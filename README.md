@@ -12,6 +12,7 @@ across all monitors or just one of them, or a rectangle drawn with the mouse:
     screenShot -o NAME      only that monitor, screenShot -l lists the names
     screenShot -d SECONDS   wait that long first
     screenShot -p           with the mouse pointer
+    screenShot -q           no toast afterwards
     screenShot -v           print the version
 
 ## Build
@@ -57,6 +58,12 @@ compositors.
   the overlay is never in it. Edges go to the pixels the pointer is on, also on a scaled
   monitor, and a rectangle may span several monitors. `-r` combines with `-c`, `-f`,
   `-o`, `-d` and `-p`.
+- **Toast:** once the screenshot is written or copied, a small box at the bottom right
+  shows a thumbnail and the file name, or "in the clipboard", for three seconds. Clicks
+  and keys go through it. It runs in the background, so the command returns at once and
+  `$(screenShot)` gets its path without waiting. A screenshot taken while a toast is up
+  has that toast in it. `-q` leaves the toast out, and so does `-f -`, where the picture
+  goes into a pipe.
 - **Clipboard:** on Wayland the clipboard holds no data, only a promise: whoever copied
   hands the data over when someone pastes. So `screenShot -c` returns at once but leaves
   a process in the background until something else is copied or the compositor exits.
@@ -79,7 +86,8 @@ can run screenShot directly and then look at the picture:
 screen to drag the rectangle. The session's shell doesn't have to be started inside
 mwc: without `WAYLAND_DISPLAY`, screenShot finds the compositor by itself (see above).
 The session then sees exactly what is on the screen, including open mail or a password
-manager.
+manager. The toast shows the person at the screen each time a session takes a
+screenshot; `-q` would hide that.
 
 ## Tests
 
@@ -87,10 +95,11 @@ manager.
 
 runs screenShot under a headless mwc. Every picture is compared pixel for pixel with
 grim's: one monitor, all eight rotations and flips, scale 2, two monitors side by side,
-plus the clipboard, the pictures folder and starting without `WAYLAND_DISPLAY`. `-r` is
-driven with mwc's simulated mouse and keyboard. It needs a built mwc in `MWC_DIR`
-(otherwise `../mwc`) with `build/vinput` and `build/pngtool`, and `grim`. mwc's
-`distrobox.ini` has everything for it.
+plus the clipboard, the toast, the pictures folder and starting without
+`WAYLAND_DISPLAY`. `-r` is driven with mwc's simulated mouse and keyboard. It needs a
+built mwc in `MWC_DIR` (otherwise `../mwc`) with `build/vinput` and `build/pngtool`, and
+`grim`. mwc's `distrobox.ini` has everything for it. The tests only count and stop their
+own screenShot processes, never one of the running session.
 
 ## License
 

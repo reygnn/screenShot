@@ -10,6 +10,8 @@
  *   screenShot -o NAME  only that monitor, -l lists them
  *   screenShot -r       a rectangle, drawn with the mouse on a still of the screen
  *
+ * Afterwards a toast shows for three seconds what became of it, -q leaves it out.
+ *
  * The screen comes through wlr-screencopy, the clipboard through ext-data-control-v1,
  * the still for -r is a wlr-layer-shell overlay.
  * Without WAYLAND_DISPLAY, as from an ssh login or a session started elsewhere, it looks
@@ -30,6 +32,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <poll.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -97,7 +100,7 @@ static void die(const char *fmt, ...)
 
 static void usage(FILE *f)
 {
-	fputs("usage: screenShot [-c | -f FILE] [-r] [-o NAME] [-d SECONDS] [-p]\n"
+	fputs("usage: screenShot [-c | -f FILE] [-r] [-o NAME] [-d SECONDS] [-p] [-q]\n"
 		"       screenShot -l | -v\n"
 		"  (none)     to Screenshots/ in the pictures folder, prints the path\n"
 		"  -c         to the clipboard, as image/png\n"
@@ -107,6 +110,7 @@ static void usage(FILE *f)
 		"  -o NAME    only that monitor\n"
 		"  -d SECONDS wait that long first\n"
 		"  -p         with the mouse pointer\n"
+		"  -q         no toast afterwards\n"
 		"  -l         list the monitors\n"
 		"  -v         print the version\n", f);
 }
@@ -250,7 +254,7 @@ static void registry_global(void *data, struct wl_registry *registry, uint32_t n
 			&ext_data_control_manager_v1_interface, 1);
 	} else if (strcmp(interface, wl_compositor_interface.name) == 0) {
 		compositor = wl_registry_bind(registry, name, &wl_compositor_interface,
-			min_u32(version, 4));
+			min_u32(version, 6));
 	} else if (strcmp(interface, zwlr_layer_shell_v1_interface.name) == 0) {
 		layer_shell = wl_registry_bind(registry, name, &zwlr_layer_shell_v1_interface,
 			min_u32(version, 4));
@@ -1236,15 +1240,17 @@ static void write_temp(int fd, const char *tmp, const struct mem *png)
 	}
 }
 
-static void print_path(const char *path)
+/* Prints the path, absolute, and keeps it in saved for the toast. */
+static void print_path(const char *path, char *saved, size_t size)
 {
 	char abs[PATH_MAX];
-	printf("%s\n", realpath(path, abs) ? abs : path);
+	snprintf(saved, size, "%s", realpath(path, abs) ? abs : path);
+	printf("%s\n", saved);
 }
 
 /* Into the pictures folder, under a name of its own: a second one in the same second
  * gets _2, and none overwrites another. */
-static void save_default(const struct mem *png)
+static void save_default(const struct mem *png, char *saved, size_t size)
 {
 	char dir[PATH_MAX - 64];
 	pictures_dir(dir, sizeof(dir) - 16);
@@ -1265,7 +1271,7 @@ static void save_default(const struct mem *png)
 		/* link() fails where a file is there: nothing is overwritten. */
 		if (link(tmp, path) == 0) {
 			unlink(tmp);
-			print_path(path);
+			print_path(path, saved, size);
 			return;
 		}
 		if (errno != EEXIST) {
@@ -1278,7 +1284,7 @@ static void save_default(const struct mem *png)
 	die("too many screenshots named %s in %s", stamp, dir);
 }
 
-static void save_file(const char *file, const struct mem *png)
+static void save_file(const char *file, const struct mem *png, char *saved, size_t size)
 {
 	if (strcmp(file, "-") == 0) {
 		if (!write_all(STDOUT_FILENO, png->data, png->len))
@@ -1301,7 +1307,285 @@ static void save_file(const char *file, const struct mem *png)
 		unlink(tmp);
 		die("cannot write %s: %s", file, strerror(err));
 	}
-	print_path(file);
+	print_path(file, saved, size);
+}
+
+/* ---- the toast ---------------------------------------------------------------------- */
+
+/*
+ * For three seconds, at the bottom right: a thumbnail and what became of the screenshot.
+ * Clicks and keys go through it to what is below. It runs in the background, so the
+ * command line gets its prompt, and $(screenShot) its path, at once.
+ */
+
+#define TOAST_MS 3000
+#define TOAST_MARGIN 24
+#define TOAST_PAD 12
+#define TOAST_THUMB_W 96
+#define TOAST_THUMB_H 54
+
+static struct {
+	struct wl_surface *surface;
+	struct zwlr_layer_surface_v1 *layer;
+	struct shmbuf buf;
+	cairo_surface_t *picture;
+	char title[64], detail[256];
+	int w, h;                       /* logical */
+	int scale;
+	bool configured;
+} toast;
+
+static void toast_line_font(cairo_t *cr, bool title)
+{
+	cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
+		title ? CAIRO_FONT_WEIGHT_BOLD : CAIRO_FONT_WEIGHT_NORMAL);
+	cairo_set_font_size(cr, title ? 14 : 12);
+}
+
+/* The thumbnail's size, within its box and in the picture's shape. */
+static void toast_thumb_size(double *tw, double *th)
+{
+	double pw = cairo_image_surface_get_width(toast.picture);
+	double ph = cairo_image_surface_get_height(toast.picture);
+	double f = fmin(TOAST_THUMB_W / pw, TOAST_THUMB_H / ph);
+	*tw = fmax(1, round(pw * f));
+	*th = fmax(1, round(ph * f));
+}
+
+static void toast_measure(void)
+{
+	cairo_surface_t *s = cairo_image_surface_create(CAIRO_FORMAT_RGB24, 1, 1);
+	cairo_t *cr = cairo_create(s);
+	cairo_text_extents_t a, b;
+	toast_line_font(cr, true);
+	cairo_text_extents(cr, toast.title, &a);
+	toast_line_font(cr, false);
+	cairo_text_extents(cr, toast.detail, &b);
+	cairo_destroy(cr);
+	cairo_surface_destroy(s);
+	double text = fmin(fmax(a.x_advance, b.x_advance), 480);
+	toast.w = (int)ceil(TOAST_PAD + TOAST_THUMB_W + TOAST_PAD + text + TOAST_PAD);
+	toast.h = TOAST_PAD + TOAST_THUMB_H + TOAST_PAD;
+}
+
+static void toast_draw(void)
+{
+	int s = toast.scale, w = toast.w * s, h = toast.h * s;
+	if (toast.buf.busy)
+		return;
+	if (toast.buf.wl && (toast.buf.w != w || toast.buf.h != h)) {
+		wl_buffer_destroy(toast.buf.wl);
+		munmap(toast.buf.data, toast.buf.size);
+		toast.buf.wl = NULL;
+	}
+	if (!toast.buf.wl) {
+		struct shmbuf *b = &toast.buf;
+		b->size = (size_t)w * 4 * h;
+		int fd = shm_file(b->size);
+		b->data = mmap(NULL, b->size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+		if (b->data == MAP_FAILED)
+			die("mmap: %s", strerror(errno));
+		struct wl_shm_pool *pool = wl_shm_create_pool(shm, fd, b->size);
+		b->wl = wl_shm_pool_create_buffer(pool, 0, w, h, w * 4, WL_SHM_FORMAT_XRGB8888);
+		wl_shm_pool_destroy(pool);
+		close(fd);
+		wl_buffer_add_listener(b->wl, &buffer_listener, b);
+		b->w = w;
+		b->h = h;
+	}
+	cairo_surface_t *cs = cairo_image_surface_create_for_data(toast.buf.data,
+		CAIRO_FORMAT_RGB24, w, h, w * 4);
+	cairo_t *cr = cairo_create(cs);
+	cairo_scale(cr, s, s);
+	cairo_set_source_rgb(cr, 0x2b / 255.0, 0x2b / 255.0, 0x2b / 255.0);
+	cairo_paint(cr);
+	cairo_set_source_rgb(cr, 0x80 / 255.0, 0x80 / 255.0, 0x80 / 255.0);
+	cairo_set_line_width(cr, 1);
+	cairo_rectangle(cr, 0.5, 0.5, toast.w - 1, toast.h - 1);
+	cairo_stroke(cr);
+
+	double tw, th;
+	toast_thumb_size(&tw, &th);
+	double tx = TOAST_PAD + (TOAST_THUMB_W - tw) / 2;
+	double ty = TOAST_PAD + (TOAST_THUMB_H - th) / 2;
+	cairo_save(cr);
+	cairo_rectangle(cr, tx, ty, tw, th);
+	cairo_clip(cr);
+	cairo_translate(cr, tx, ty);
+	cairo_scale(cr, tw / cairo_image_surface_get_width(toast.picture),
+		th / cairo_image_surface_get_height(toast.picture));
+	cairo_set_source_surface(cr, toast.picture, 0, 0);
+	cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_GOOD);
+	cairo_paint(cr);
+	cairo_restore(cr);
+	cairo_set_source_rgb(cr, 0x80 / 255.0, 0x80 / 255.0, 0x80 / 255.0);
+	cairo_rectangle(cr, tx - 0.5, ty - 0.5, tw + 1, th + 1);
+	cairo_stroke(cr);
+
+	double x = TOAST_PAD + TOAST_THUMB_W + TOAST_PAD;
+	cairo_rectangle(cr, x, 0, toast.w - x - TOAST_PAD, toast.h);
+	cairo_clip(cr);
+	cairo_set_source_rgb(cr, 1, 1, 1);
+	toast_line_font(cr, true);
+	cairo_move_to(cr, x, toast.h / 2.0 - 6);
+	cairo_show_text(cr, toast.title);
+	cairo_set_source_rgb(cr, 0xd0 / 255.0, 0xd0 / 255.0, 0xd0 / 255.0);
+	toast_line_font(cr, false);
+	cairo_move_to(cr, x, toast.h / 2.0 + 14);
+	cairo_show_text(cr, toast.detail);
+	cairo_destroy(cr);
+	cairo_surface_destroy(cs);
+
+	wl_surface_set_buffer_scale(toast.surface, s);
+	wl_surface_attach(toast.surface, toast.buf.wl, 0, 0);
+	wl_surface_damage_buffer(toast.surface, 0, 0, w, h);
+	wl_surface_commit(toast.surface);
+	toast.buf.busy = true;
+}
+
+static void toast_configure(void *data, struct zwlr_layer_surface_v1 *layer,
+	uint32_t serial, uint32_t w, uint32_t h)
+{
+	zwlr_layer_surface_v1_ack_configure(layer, serial);
+	toast.configured = true;
+	toast_draw();
+}
+
+static void toast_closed(void *data, struct zwlr_layer_surface_v1 *layer)
+{
+}
+
+static const struct zwlr_layer_surface_v1_listener toast_layer_listener = {
+	.configure = toast_configure,
+	.closed = toast_closed,
+};
+
+static void toast_surface_enter(void *data, struct wl_surface *s, struct wl_output *o)
+{
+}
+
+static void toast_surface_leave(void *data, struct wl_surface *s, struct wl_output *o)
+{
+}
+
+/* Sharp on the monitor it ends up on. */
+static void toast_preferred_scale(void *data, struct wl_surface *s, int32_t scale)
+{
+	if (scale < 1 || scale == toast.scale)
+		return;
+	toast.scale = scale;
+	if (toast.configured)
+		toast_draw();
+}
+
+static void toast_preferred_transform(void *data, struct wl_surface *s,
+	uint32_t transform)
+{
+}
+
+static const struct wl_surface_listener toast_surface_listener = {
+	.enter = toast_surface_enter,
+	.leave = toast_surface_leave,
+	.preferred_buffer_scale = toast_preferred_scale,
+	.preferred_buffer_transform = toast_preferred_transform,
+};
+
+/* Into the background, away from the terminal: stdout must close, or $(...) waits. */
+static void go_background(void)
+{
+	fflush(stdout);
+	pid_t pid = fork();
+	if (pid < 0)
+		die("fork: %s", strerror(errno));
+	if (pid > 0)
+		_exit(0); /* the child keeps the connection: no disconnect here */
+	setsid();
+	int null = open("/dev/null", O_RDWR);
+	if (null >= 0) {
+		dup2(null, STDIN_FILENO);
+		dup2(null, STDOUT_FILENO);
+		dup2(null, STDERR_FILENO);
+		if (null > STDERR_FILENO)
+			close(null);
+	}
+}
+
+static long now_ms(void)
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return ts.tv_sec * 1000L + ts.tv_nsec / 1000000;
+}
+
+/* Handles events until the time is up, or until the compositor is gone. */
+static bool dispatch_until(long deadline)
+{
+	for (;;) {
+		long left = deadline - now_ms();
+		if (left <= 0)
+			return true;
+		while (wl_display_prepare_read(display) != 0)
+			if (wl_display_dispatch_pending(display) < 0)
+				return false;
+		if (wl_display_flush(display) < 0 && errno != EAGAIN) {
+			wl_display_cancel_read(display);
+			return false;
+		}
+		struct pollfd p = { .fd = wl_display_get_fd(display), .events = POLLIN };
+		int r = poll(&p, 1, (int)left);
+		if (r > 0) {
+			if (wl_display_read_events(display) < 0)
+				return false;
+		} else {
+			wl_display_cancel_read(display);
+			if (r < 0 && errno != EINTR)
+				return false;
+		}
+		if (wl_display_dispatch_pending(display) < 0)
+			return false;
+	}
+}
+
+/* Up for TOAST_MS, then gone. Without layer-shell there is none. */
+static void show_toast(cairo_surface_t *picture, const char *title, const char *detail)
+{
+	if (!compositor || !layer_shell || !picture)
+		return;
+	memset(&toast, 0, sizeof(toast));
+	toast.picture = picture;
+	snprintf(toast.title, sizeof(toast.title), "%s", title);
+	snprintf(toast.detail, sizeof(toast.detail), "%s", detail);
+	toast.scale = 1;
+	for (int i = 0; i < n_outputs; i++)
+		if (outputs[i].scale > toast.scale)
+			toast.scale = outputs[i].scale;
+	toast_measure();
+
+	toast.surface = wl_compositor_create_surface(compositor);
+	wl_surface_add_listener(toast.surface, &toast_surface_listener, NULL);
+	struct wl_region *none = wl_compositor_create_region(compositor);
+	wl_surface_set_input_region(toast.surface, none);
+	wl_region_destroy(none);
+	/* No output named: the compositor puts it where the user is. */
+	toast.layer = zwlr_layer_shell_v1_get_layer_surface(layer_shell, toast.surface, NULL,
+		ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY, "screenShot-toast");
+	zwlr_layer_surface_v1_add_listener(toast.layer, &toast_layer_listener, NULL);
+	zwlr_layer_surface_v1_set_size(toast.layer, toast.w, toast.h);
+	zwlr_layer_surface_v1_set_anchor(toast.layer,
+		ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM | ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT);
+	zwlr_layer_surface_v1_set_margin(toast.layer, 0, TOAST_MARGIN, TOAST_MARGIN, 0);
+	zwlr_layer_surface_v1_set_keyboard_interactivity(toast.layer, 0);
+	wl_surface_commit(toast.surface);
+
+	dispatch_until(now_ms() + TOAST_MS);
+
+	zwlr_layer_surface_v1_destroy(toast.layer);
+	wl_surface_destroy(toast.surface);
+	if (toast.buf.wl) {
+		wl_buffer_destroy(toast.buf.wl);
+		munmap(toast.buf.data, toast.buf.size);
+	}
+	wl_display_roundtrip(display);
 }
 
 /* ---- the clipboard ------------------------------------------------------------------ */
@@ -1368,7 +1652,7 @@ static const struct ext_data_control_device_v1_listener device_listener = {
  * when someone pastes. So screenShot stays, in the background, until something else is
  * copied.
  */
-static void to_clipboard(struct mem *png)
+static void to_clipboard(struct mem *png, cairo_surface_t *picture)
 {
 	if (!seat)
 		die("the compositor has no seat");
@@ -1386,20 +1670,13 @@ static void to_clipboard(struct mem *png)
 	if (clip_cancelled)
 		die("the compositor did not take the selection");
 
-	fflush(stdout);
-	pid_t pid = fork();
-	if (pid < 0)
-		die("fork: %s", strerror(errno));
-	if (pid > 0)
-		_exit(0); /* the child keeps the connection: no disconnect here */
-	setsid();
-	int null = open("/dev/null", O_RDWR);
-	if (null >= 0) {
-		dup2(null, STDIN_FILENO);
-		dup2(null, STDOUT_FILENO);
-		dup2(null, STDERR_FILENO);
-		if (null > STDERR_FILENO)
-			close(null);
+	go_background();
+	if (picture) {
+		char detail[64];
+		snprintf(detail, sizeof(detail), "%d x %d, in the clipboard",
+			cairo_image_surface_get_width(picture),
+			cairo_image_surface_get_height(picture));
+		show_toast(picture, "Screenshot copied", detail);
 	}
 	while (!clip_cancelled && wl_display_dispatch(display) >= 0)
 		;
@@ -1421,11 +1698,11 @@ static void list_outputs(void)
 
 int main(int argc, char *argv[])
 {
-	bool clipboard = false, pointer = false, list = false, region = false;
+	bool clipboard = false, pointer = false, list = false, region = false, quiet = false;
 	const char *file = NULL, *only = NULL;
 	double delay = 0;
 	int opt;
-	while ((opt = getopt(argc, argv, "cf:o:d:plrvh")) != -1) {
+	while ((opt = getopt(argc, argv, "cf:o:d:plqrvh")) != -1) {
 		switch (opt) {
 		case 'c':
 			clipboard = true;
@@ -1450,6 +1727,9 @@ int main(int argc, char *argv[])
 			break;
 		case 'l':
 			list = true;
+			break;
+		case 'q':
+			quiet = true;
 			break;
 		case 'r':
 			region = true;
@@ -1530,13 +1810,22 @@ int main(int argc, char *argv[])
 	}
 	struct mem png = { 0 };
 	encode_png(picture, &png);
-	cairo_surface_destroy(picture);
 
-	if (clipboard)
-		to_clipboard(&png);
-	else if (file)
-		save_file(file, &png);
-	else
-		save_default(&png);
+	char saved[PATH_MAX] = "";
+	if (clipboard) {
+		to_clipboard(&png, quiet ? NULL : picture);
+	} else if (file) {
+		save_file(file, &png, saved, sizeof(saved));
+		/* Into a pipe: someone else takes it from there. */
+		if (strcmp(file, "-") == 0)
+			quiet = true;
+	} else {
+		save_default(&png, saved, sizeof(saved));
+	}
+	if (!quiet && compositor && layer_shell) {
+		go_background();
+		const char *name = strrchr(saved, '/');
+		show_toast(picture, "Screenshot saved", name ? name + 1 : saved);
+	}
 	return 0;
 }

@@ -36,7 +36,7 @@ check() { # <description> <shell condition>
 }
 
 run_shot() { # [args...]: with WAYLAND_DISPLAY, output in $OUT, status in $STATUS
-	OUT=$(WAYLAND_DISPLAY=wayland-0 "$SHOT" "$@" 2>"$SHOT_ERR")
+	OUT=$(WAYLAND_DISPLAY=wayland-0 "$SHOT" -q "$@" 2>"$SHOT_ERR")
 	STATUS=$?
 	cat "$SHOT_ERR" >>"$LOG"
 }
@@ -55,12 +55,17 @@ same_as_grim() {
 	echo "ok: $what"
 }
 
+pixel_now() { # <x> <y>
+	WAYLAND_DISPLAY=wayland-0 grim "$SMOKE_DIR/now.png" 2>/dev/null &&
+		build/pngtool pixel "$SMOKE_DIR/now.png" "$1" "$2"
+}
+
 # The wallpaper is up once the middle of the screen is no longer the plain colour.
 begin() {
 	start_mwc 'exec sleep 300'
 	local i
 	for ((i = 0; i < 50; i++)); do
-		WAYLAND_DISPLAY=wayland-0 "$SHOT" -f "$SMOKE_DIR/up.png" >/dev/null 2>&1 &&
+		WAYLAND_DISPLAY=wayland-0 "$SHOT" -q -f "$SMOKE_DIR/up.png" >/dev/null 2>&1 &&
 			WAYLAND_DISPLAY=wayland-0 grim "$SMOKE_DIR/up2.png" 2>/dev/null &&
 			"$PNGCMP" same "$SMOKE_DIR/up.png" "$SMOKE_DIR/up2.png" >/dev/null &&
 			"$PNGCMP" same "$SMOKE_DIR/up.png" "$WALL" >/dev/null && break
@@ -87,7 +92,7 @@ check "-f prints the path" "[ \"\$OUT\" = \"$SMOKE_DIR/a.png\" ]"
 check "-f: what is on the screen, the wallpaper" "\"$PNGCMP\" same \"$SMOKE_DIR/a.png\" \"$WALL\""
 same_as_grim "-f: the same as grim" "$SMOKE_DIR/a.png"
 check "-f: no temporary file is left" "[ -z \"\$(ls -A \"$SMOKE_DIR\" | grep '^\\.screenShot-')\" ]"
-(cd "$SMOKE_DIR" && WAYLAND_DISPLAY=wayland-0 "$SHOT" -f rel.png >"$SMOKE_DIR/rel.out" 2>>"$LOG")
+(cd "$SMOKE_DIR" && WAYLAND_DISPLAY=wayland-0 "$SHOT" -q -f rel.png >"$SMOKE_DIR/rel.out" 2>>"$LOG")
 check "-f with a relative path prints it absolute" "[ \"\$(cat \"$SMOKE_DIR/rel.out\")\" = \"$SMOKE_DIR/rel.png\" ]"
 run_shot -f "$SMOKE_DIR/a.png"
 check "-f overwrites a file it is told to" "[ $STATUS = 0 ]"
@@ -144,7 +149,7 @@ rm "$XDG_CONFIG_HOME/user-dirs.dirs"
 # ---- without WAYLAND_DISPLAY -------------------------------------------------------------
 
 # As from an ssh login or a Claude session started outside the desktop.
-OUT=$(env -u WAYLAND_DISPLAY "$SHOT" -f "$SMOKE_DIR/nodisp.png" 2>>"$LOG")
+OUT=$(env -u WAYLAND_DISPLAY "$SHOT" -q -f "$SMOKE_DIR/nodisp.png" 2>>"$LOG")
 check "without WAYLAND_DISPLAY it finds the compositor in XDG_RUNTIME_DIR" \
 	"[ \"\$OUT\" = \"$SMOKE_DIR/nodisp.png\" ]"
 same_as_grim "... and takes its screen" "$SMOKE_DIR/nodisp.png"
@@ -161,7 +166,16 @@ check "no compositor in the runtime directory: status 1" "[ $? = 1 ]"
 
 # ---- the clipboard -------------------------------------------------------------------------
 
-shot_count() { pgrep -x screenShot | wc -l; }
+# Only this test's own: pgrep alone would also see a screenShot of the real session,
+# for example the one holding its clipboard, and the box shares the host's processes.
+test_shots() {
+	local p
+	for p in $(pgrep -x screenShot); do
+		{ tr '\0' '\n' <"/proc/$p/environ"; } 2>/dev/null | grep -qx "SMOKE_DIR=$SMOKE_DIR" &&
+			echo "$p"
+	done
+}
+shot_count() { test_shots | wc -l; }
 run_shot -c
 check "-c: status 0, at once" "[ $STATUS = 0 ]"
 check "-c: nothing on stdout" "[ -z \"\$OUT\" ]"
@@ -175,6 +189,54 @@ run_shot -c
 wait_for "a new copy ends the one before" test "$(shot_count)" = 1
 WAYLAND_DISPLAY=wayland-0 "$CLIPGET" image/png >"$SMOKE_DIR/clip3.png" 2>>"$LOG"
 same_as_grim "and the new one serves" "$SMOKE_DIR/clip3.png"
+
+# ---- the toast -----------------------------------------------------------------------------
+
+# It sits at the bottom right, 24 from the edges; 4 pixels in is its background. Below
+# it the wallpaper's quarter is white.
+toast_shown() { [ "$(pixel_now 1252 692)" = 2b2b2b ]; }
+toast_gone() { [ "$(pixel_now 1252 692)" = ffffff ]; }
+ms() { echo $(($(date +%s%N) / 1000000)); }
+
+WAYLAND_DISPLAY=wayland-0 "$CLIPGET" image/png >/dev/null 2>&1 # the -c one above
+kill $(test_shots) 2>/dev/null
+wait_for "no screenShot left" test "$(shot_count)" = 0
+t0=$(ms)
+OUT=$(WAYLAND_DISPLAY=wayland-0 "$SHOT" -f "$SMOKE_DIR/toast.png" 2>>"$LOG")
+STATUS=$?
+t1=$(ms)
+check "with a toast: status 0, the path" "[ $STATUS = 0 ] && [ \"\$OUT\" = \"$SMOKE_DIR/toast.png\" ]"
+check "\$(...) does not wait for the toast ($((t1 - t0)) ms)" "[ $((t1 - t0)) -lt 1500 ]"
+wait_for "the toast shows" toast_shown
+t2=$(ms)
+check "the screenshot has no toast in it" "[ \"\$(build/pngtool pixel \"$SMOKE_DIR/toast.png\" 1252 692)\" = ffffff ]"
+wait_for "the toast goes" toast_gone
+t3=$(ms)
+check "it was up about 3 seconds ($((t3 - t0)) ms)" "[ $((t3 - t0)) -ge 2500 ] && [ $((t3 - t0)) -le 5000 ]"
+wait_for "and its process ends" test "$(shot_count)" = 0
+
+WAYLAND_DISPLAY=wayland-0 "$SHOT" -q -f "$SMOKE_DIR/quiet.png" >/dev/null 2>>"$LOG"
+sleep 0.5
+check "-q: no toast" "toast_gone && [ \"\$(shot_count)\" = 0 ]"
+WAYLAND_DISPLAY=wayland-0 "$SHOT" -f - >"$SMOKE_DIR/pipe.png" 2>>"$LOG"
+sleep 0.5
+check "-f -: no toast either" "toast_gone && [ \"\$(shot_count)\" = 0 ]"
+
+WAYLAND_DISPLAY=wayland-0 "$SHOT" >/dev/null 2>>"$LOG"
+wait_for "a toast also for the pictures folder" toast_shown
+wait_for "... which goes again" toast_gone
+
+t0=$(ms)
+WAYLAND_DISPLAY=wayland-0 "$SHOT" -c 2>>"$LOG"
+check "-c with a toast: returns at once" "[ $(($(ms) - t0)) -lt 1500 ]"
+wait_for "-c: the toast shows" toast_shown
+WAYLAND_DISPLAY=wayland-0 "$CLIPGET" image/png >"$SMOKE_DIR/tclip.png" 2>>"$LOG"
+check "-c: pasting works while the toast is up" "[ \"\$(build/pngtool pixel \"$SMOKE_DIR/tclip.png\" 1252 692)\" = ffffff ]"
+wait_for "-c: the toast goes" toast_gone
+WAYLAND_DISPLAY=wayland-0 "$CLIPGET" image/png >"$SMOKE_DIR/tclip2.png" 2>>"$LOG"
+check "-c: and pasting still works after it" "\"$PNGCMP\" same \"$SMOKE_DIR/tclip.png\" \"$SMOKE_DIR/tclip2.png\""
+check "-c: one screenShot stays for the clipboard" "[ \"\$(shot_count)\" = 1 ]"
+
 stop_mwc
 for ((i = 0; i < 25; i++)); do
 	[ "$(shot_count)" = 0 ] && break
@@ -187,7 +249,7 @@ check "the clipboard screenShot ends with the compositor" "[ \"\$(shot_count)\" 
 # region_start [args...]: screenShot -r in the background, until its still is up. The red
 # quarter at 600,50 is dimmed then.
 region_start() {
-	WAYLAND_DISPLAY=wayland-0 "$SHOT" -r "$@" >"$SMOKE_DIR/r.out" 2>"$SHOT_ERR" &
+	WAYLAND_DISPLAY=wayland-0 "$SHOT" -q -r "$@" >"$SMOKE_DIR/r.out" 2>"$SHOT_ERR" &
 	RPID=$!
 	local i got
 	for ((i = 0; i < 50; i++)); do
@@ -212,11 +274,6 @@ region_end() {
 	STATUS=$?
 	OUT=$(cat "$SMOKE_DIR/r.out")
 	cat "$SHOT_ERR" >>"$LOG"
-}
-
-pixel_now() { # <x> <y>
-	WAYLAND_DISPLAY=wayland-0 grim "$SMOKE_DIR/now.png" 2>/dev/null &&
-		build/pngtool pixel "$SMOKE_DIR/now.png" "$1" "$2"
 }
 
 begin
