@@ -1,4 +1,4 @@
-# msc - a screenshot of the screen or a rectangle, into a file or the clipboard
+# screenShot - a screenshot of the screen or a rectangle, into a file or the clipboard
 
 PREFIX ?= /usr/local
 PKG_CONFIG ?= pkg-config
@@ -27,14 +27,14 @@ PROTO_C = build/ext-data-control-v1-protocol.c build/viewporter-protocol.c \
 # CFLAGS and LDLIBS stay the user's, also on the command line: `make CFLAGS=-O0`
 # must not lose the include paths.
 CFLAGS ?= -O2 -g
-MSC_CFLAGS = -std=c11 -Wall -Wextra -Wno-unused-parameter -Ibuild \
+SHOT_CFLAGS = -std=c11 -Wall -Wextra -Wno-unused-parameter -Ibuild \
 	$(shell $(PKG_CONFIG) --cflags $(PKGS))
-MSC_LIBS = $(shell $(PKG_CONFIG) --libs $(PKGS)) -lm
+SHOT_LIBS = $(shell $(PKG_CONFIG) --libs $(PKGS)) -lm
 
-all: msc
+all: screenShot
 
-msc: msc.c version.h $(PROTO_H) $(PROTO_C)
-	$(CC) $(MSC_CFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ msc.c $(PROTO_C) $(MSC_LIBS) $(LDLIBS)
+screenShot: screenShot.c version.h $(PROTO_H) $(PROTO_C)
+	$(CC) $(SHOT_CFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ screenShot.c $(PROTO_C) $(SHOT_LIBS) $(LDLIBS)
 
 build:
 	mkdir -p build
@@ -65,22 +65,22 @@ build/xdg-output-unstable-v1-protocol.c: | build
 # Pastes from the clipboard and compares pictures, for the tests.
 build/clipget: tests/clipget.c build/ext-data-control-v1-client-protocol.h \
 		build/ext-data-control-v1-protocol.c
-	$(CC) $(MSC_CFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ tests/clipget.c \
-		build/ext-data-control-v1-protocol.c $(MSC_LIBS) $(LDLIBS)
+	$(CC) $(SHOT_CFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ tests/clipget.c \
+		build/ext-data-control-v1-protocol.c $(SHOT_LIBS) $(LDLIBS)
 build/pngcmp: tests/pngcmp.c | build
-	$(CC) $(MSC_CFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ tests/pngcmp.c $(MSC_LIBS) $(LDLIBS)
+	$(CC) $(SHOT_CFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ tests/pngcmp.c $(SHOT_LIBS) $(LDLIBS)
 
-install: msc
-	install -Dm755 msc $(DESTDIR)$(PREFIX)/bin/msc
+install: screenShot
+	install -Dm755 screenShot $(DESTDIR)$(PREFIX)/bin/screenShot
 
 uninstall:
-	rm -f $(DESTDIR)$(PREFIX)/bin/msc
+	rm -f $(DESTDIR)$(PREFIX)/bin/screenShot
 
 # Needs a built mwc next to this directory, or in MWC_DIR, plus grim.
-test: msc build/clipget build/pngcmp
+test: screenShot build/clipget build/pngcmp
 	tests/test.sh
 
 clean:
-	rm -rf msc build
+	rm -rf screenShot build
 
 .PHONY: all install uninstall test clean

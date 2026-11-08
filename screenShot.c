@@ -1,14 +1,14 @@
 /*
- * msc - takes a screenshot of the screen or a rectangle, into a file or the clipboard.
- * For mwc (https://github.com/reygnn/mwc) and any other Wayland compositor with the
+ * screenShot - takes a screenshot of the screen or a rectangle, into a file or the
+ * clipboard. No window of its own. For mwc (https://github.com/reygnn/mwc) and any other Wayland compositor with the
  * same protocols.
  *
- *   msc               Screenshots/Screenshot_<date>_<time>.png in the pictures folder,
- *                     the path goes to stdout
- *   msc -c            the clipboard, as image/png
- *   msc -f FILE       that file, "-" for stdout
- *   msc -o NAME       only that monitor, -l lists them
- *   msc -r            a rectangle, drawn with the mouse on a still of the screen
+ *   screenShot          Screenshots/Screenshot_<date>_<time>.png in the pictures
+ *                       folder, the path goes to stdout
+ *   screenShot -c       the clipboard, as image/png
+ *   screenShot -f FILE  that file, "-" for stdout
+ *   screenShot -o NAME  only that monitor, -l lists them
+ *   screenShot -r       a rectangle, drawn with the mouse on a still of the screen
  *
  * The screen comes through wlr-screencopy, the clipboard through ext-data-control-v1,
  * the still for -r is a wlr-layer-shell overlay.
@@ -88,7 +88,7 @@ static void die(const char *fmt, ...)
 {
 	va_list ap;
 	va_start(ap, fmt);
-	fputs("msc: ", stderr);
+	fputs("screenShot: ", stderr);
 	vfprintf(stderr, fmt, ap);
 	fputc('\n', stderr);
 	va_end(ap);
@@ -97,8 +97,8 @@ static void die(const char *fmt, ...)
 
 static void usage(FILE *f)
 {
-	fputs("usage: msc [-c | -f FILE] [-r] [-o NAME] [-d SECONDS] [-p]\n"
-		"       msc -l | -v\n"
+	fputs("usage: screenShot [-c | -f FILE] [-r] [-o NAME] [-d SECONDS] [-p]\n"
+		"       screenShot -l | -v\n"
 		"  (none)     to Screenshots/ in the pictures folder, prints the path\n"
 		"  -c         to the clipboard, as image/png\n"
 		"  -f FILE    to FILE, - for stdout\n"
@@ -418,7 +418,7 @@ static void frame_linux_dmabuf(void *data, struct zwlr_screencopy_frame_v1 *fram
 
 static int shm_file(size_t size)
 {
-	int fd = memfd_create("msc", MFD_CLOEXEC);
+	int fd = memfd_create("screenShot", MFD_CLOEXEC);
 	if (fd < 0)
 		die("memfd_create: %s", strerror(errno));
 	if (ftruncate(fd, size) < 0)
@@ -430,8 +430,8 @@ static void frame_buffer_done(void *data, struct zwlr_screencopy_frame_v1 *frame
 {
 	struct output *o = data;
 	if (!o->have_format) {
-		fprintf(stderr, "msc: %s: the compositor offers no shm format msc can read\n",
-			o->name);
+		fprintf(stderr, "screenShot: %s: the compositor offers no shm format "
+			"screenShot can read\n", o->name);
 		o->failed = true;
 		return;
 	}
@@ -470,7 +470,7 @@ static void frame_ready(void *data, struct zwlr_screencopy_frame_v1 *frame,
 static void frame_failed(void *data, struct zwlr_screencopy_frame_v1 *frame)
 {
 	struct output *o = data;
-	fprintf(stderr, "msc: %s: the compositor could not copy the screen\n", o->name);
+	fprintf(stderr, "screenShot: %s: the compositor could not copy the screen\n", o->name);
 	o->failed = true;
 }
 
@@ -1008,7 +1008,7 @@ static bool select_rectangle(struct output **list, int n, double *x, double *y,
 		else
 			wl_surface_set_buffer_scale(ov->surface, (int)round(ov->scale));
 		ov->layer = zwlr_layer_shell_v1_get_layer_surface(layer_shell, ov->surface,
-			ov->o->wl, ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY, "msc");
+			ov->o->wl, ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY, "screenShot");
 		zwlr_layer_surface_v1_add_listener(ov->layer, &layer_listener, ov);
 		zwlr_layer_surface_v1_set_anchor(ov->layer,
 			ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP | ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM |
@@ -1219,7 +1219,7 @@ static void pictures_dir(char *out, size_t size)
 /* A file next to where it goes, so nobody ever sees half a picture there. */
 static int temp_file(const char *dir, char *path, size_t size)
 {
-	snprintf(path, size, "%s/.msc-XXXXXX", dir);
+	snprintf(path, size, "%s/.screenShot-XXXXXX", dir);
 	int fd = mkostemp(path, O_CLOEXEC);
 	if (fd < 0)
 		die("cannot write in %s: %s", dir, strerror(errno));
@@ -1365,7 +1365,8 @@ static const struct ext_data_control_device_v1_listener device_listener = {
 
 /*
  * On Wayland the clipboard holds no data, only a promise: whoever copied hands it out
- * when someone pastes. So msc stays, in the background, until something else is copied.
+ * when someone pastes. So screenShot stays, in the background, until something else is
+ * copied.
  */
 static void to_clipboard(struct mem *png)
 {
@@ -1439,7 +1440,7 @@ int main(int argc, char *argv[])
 			char *end;
 			delay = strtod(optarg, &end);
 			if (*end || delay < 0 || delay > 3600) {
-				fprintf(stderr, "msc: -d wants seconds, not %s\n", optarg);
+				fprintf(stderr, "screenShot: -d wants seconds, not %s\n", optarg);
 				return 2;
 			}
 			break;
@@ -1454,7 +1455,7 @@ int main(int argc, char *argv[])
 			region = true;
 			break;
 		case 'v':
-			printf("msc %s\n", MSC_VERSION);
+			printf("screenShot %s\n", SCREENSHOT_VERSION);
 			return 0;
 		case 'h':
 			usage(stdout);
@@ -1489,7 +1490,7 @@ int main(int argc, char *argv[])
 			chosen[n++] = &outputs[i];
 	if (n == 0) {
 		if (only)
-			die("no monitor named %s (msc -l lists them)", only);
+			die("no monitor named %s (screenShot -l lists them)", only);
 		die("the compositor has no monitors");
 	}
 
