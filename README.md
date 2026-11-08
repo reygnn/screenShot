@@ -58,12 +58,12 @@ compositors.
   the overlay is never in it. Edges go to the pixels the pointer is on, also on a scaled
   monitor, and a rectangle may span several monitors. `-r` combines with `-c`, `-f`,
   `-o`, `-d` and `-p`.
-- **Toast:** once the screenshot is written or copied, a small box at the bottom right
-  shows a thumbnail and the file name, or "in the clipboard", for three seconds. Clicks
-  and keys go through it. It runs in the background, so the command returns at once and
-  `$(screenShot)` gets its path without waiting. A screenshot taken while a toast is up
-  has that toast in it. `-q` leaves the toast out, and so does `-f -`, where the picture
-  goes into a pipe.
+- **Toast:** once the screenshot is written or copied, a small box at the top in the
+  middle, a little below the edge, shows a thumbnail and the file name, or "in the
+  clipboard", for three seconds. Clicks and keys go through it. It runs in the
+  background, so the command returns at once and `$(screenShot)` gets its path without
+  waiting. A screenshot taken while a toast is up has that toast in it. `-q` leaves the
+  toast out, and so does `-f -`, where the picture goes into a pipe.
 - **Clipboard:** on Wayland the clipboard holds no data, only a promise: whoever copied
   hands the data over when someone pastes. So `screenShot -c` returns at once but leaves
   a process in the background until something else is copied or the compositor exits.

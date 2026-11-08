@@ -1313,13 +1313,14 @@ static void save_file(const char *file, const struct mem *png, char *saved, size
 /* ---- the toast ---------------------------------------------------------------------- */
 
 /*
- * For three seconds, at the bottom right: a thumbnail and what became of the screenshot.
+ * For three seconds, at the top in the middle, a little below the edge: a thumbnail and
+ * what became of the screenshot.
  * Clicks and keys go through it to what is below. It runs in the background, so the
  * command line gets its prompt, and $(screenShot) its path, at once.
  */
 
 #define TOAST_MS 3000
-#define TOAST_MARGIN 24
+#define TOAST_MARGIN 32         /* below the top edge */
 #define TOAST_PAD 12
 #define TOAST_THUMB_W 96
 #define TOAST_THUMB_H 54
@@ -1571,9 +1572,9 @@ static void show_toast(cairo_surface_t *picture, const char *title, const char *
 		ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY, "screenShot-toast");
 	zwlr_layer_surface_v1_add_listener(toast.layer, &toast_layer_listener, NULL);
 	zwlr_layer_surface_v1_set_size(toast.layer, toast.w, toast.h);
-	zwlr_layer_surface_v1_set_anchor(toast.layer,
-		ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM | ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT);
-	zwlr_layer_surface_v1_set_margin(toast.layer, 0, TOAST_MARGIN, TOAST_MARGIN, 0);
+	/* Anchored to the top alone, it is centred across. */
+	zwlr_layer_surface_v1_set_anchor(toast.layer, ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP);
+	zwlr_layer_surface_v1_set_margin(toast.layer, TOAST_MARGIN, 0, 0, 0);
 	zwlr_layer_surface_v1_set_keyboard_interactivity(toast.layer, 0);
 	wl_surface_commit(toast.surface);
 

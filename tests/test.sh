@@ -192,10 +192,11 @@ same_as_grim "and the new one serves" "$SMOKE_DIR/clip3.png"
 
 # ---- the toast -----------------------------------------------------------------------------
 
-# It sits at the bottom right, 24 from the edges; 4 pixels in is its background. Below
-# it the wallpaper's quarter is white.
-toast_shown() { [ "$(pixel_now 1252 692)" = 2b2b2b ]; }
-toast_gone() { [ "$(pixel_now 1252 692)" = ffffff ]; }
+# It sits at the top in the middle, 32 below the edge; 4 pixels in is its background.
+# Below it the wallpaper's quarter is green.
+TOAST_X=645 TOAST_Y=36
+toast_shown() { [ "$(pixel_now $TOAST_X $TOAST_Y)" = 2b2b2b ]; }
+toast_gone() { [ "$(pixel_now $TOAST_X $TOAST_Y)" = 00ff00 ]; }
 ms() { echo $(($(date +%s%N) / 1000000)); }
 
 WAYLAND_DISPLAY=wayland-0 "$CLIPGET" image/png >/dev/null 2>&1 # the -c one above
@@ -209,7 +210,7 @@ check "with a toast: status 0, the path" "[ $STATUS = 0 ] && [ \"\$OUT\" = \"$SM
 check "\$(...) does not wait for the toast ($((t1 - t0)) ms)" "[ $((t1 - t0)) -lt 1500 ]"
 wait_for "the toast shows" toast_shown
 t2=$(ms)
-check "the screenshot has no toast in it" "[ \"\$(build/pngtool pixel \"$SMOKE_DIR/toast.png\" 1252 692)\" = ffffff ]"
+check "the screenshot has no toast in it" "[ \"\$(build/pngtool pixel \"$SMOKE_DIR/toast.png\" $TOAST_X $TOAST_Y)\" = 00ff00 ]"
 wait_for "the toast goes" toast_gone
 t3=$(ms)
 check "it was up about 3 seconds ($((t3 - t0)) ms)" "[ $((t3 - t0)) -ge 2500 ] && [ $((t3 - t0)) -le 5000 ]"
@@ -231,7 +232,7 @@ WAYLAND_DISPLAY=wayland-0 "$SHOT" -c 2>>"$LOG"
 check "-c with a toast: returns at once" "[ $(($(ms) - t0)) -lt 1500 ]"
 wait_for "-c: the toast shows" toast_shown
 WAYLAND_DISPLAY=wayland-0 "$CLIPGET" image/png >"$SMOKE_DIR/tclip.png" 2>>"$LOG"
-check "-c: pasting works while the toast is up" "[ \"\$(build/pngtool pixel \"$SMOKE_DIR/tclip.png\" 1252 692)\" = ffffff ]"
+check "-c: pasting works while the toast is up" "[ \"\$(build/pngtool pixel \"$SMOKE_DIR/tclip.png\" $TOAST_X $TOAST_Y)\" = 00ff00 ]"
 wait_for "-c: the toast goes" toast_gone
 WAYLAND_DISPLAY=wayland-0 "$CLIPGET" image/png >"$SMOKE_DIR/tclip2.png" 2>>"$LOG"
 check "-c: and pasting still works after it" "\"$PNGCMP\" same \"$SMOKE_DIR/tclip.png\" \"$SMOKE_DIR/tclip2.png\""
