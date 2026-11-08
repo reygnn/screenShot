@@ -1,15 +1,17 @@
 /*
- * msc - takes a screenshot of the whole screen, into a file or the clipboard. For mwc
- * (https://github.com/reygnn/mwc) and any other Wayland compositor with the same
- * protocols.
+ * msc - takes a screenshot of the screen or a rectangle, into a file or the clipboard.
+ * For mwc (https://github.com/reygnn/mwc) and any other Wayland compositor with the
+ * same protocols.
  *
  *   msc               Screenshots/Screenshot_<date>_<time>.png in the pictures folder,
  *                     the path goes to stdout
  *   msc -c            the clipboard, as image/png
  *   msc -f FILE       that file, "-" for stdout
  *   msc -o NAME       only that monitor, -l lists them
+ *   msc -r            a rectangle, drawn with the mouse on a still of the screen
  *
- * The screen comes through wlr-screencopy, the clipboard through ext-data-control-v1.
+ * The screen comes through wlr-screencopy, the clipboard through ext-data-control-v1,
+ * the still for -r is a wlr-layer-shell overlay.
  * Without WAYLAND_DISPLAY, as from an ssh login or a session started elsewhere, it looks
  * for a compositor in the runtime directory by itself.
  */
@@ -19,6 +21,8 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <linux/input-event-codes.h>
+#include <math.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdbool.h>
@@ -33,9 +37,12 @@
 #include <time.h>
 #include <unistd.h>
 #include <wayland-client.h>
+#include <wayland-cursor.h>
 
 #include "ext-data-control-v1-client-protocol.h"
 #include "version.h"
+#include "viewporter-client-protocol.h"
+#include "wlr-layer-shell-unstable-v1-client-protocol.h"
 #include "wlr-screencopy-unstable-v1-client-protocol.h"
 #include "xdg-output-unstable-v1-client-protocol.h"
 
@@ -69,6 +76,10 @@ static struct wl_seat *seat;
 static struct zwlr_screencopy_manager_v1 *screencopy;
 static struct zxdg_output_manager_v1 *xdg_output_manager;
 static struct ext_data_control_manager_v1 *data_control;
+static struct wl_compositor *compositor;
+static struct zwlr_layer_shell_v1 *layer_shell;
+static struct wp_viewporter *viewporter;
+static uint32_t seat_caps;
 static struct output outputs[MAX_OUTPUTS];
 static int n_outputs;
 
@@ -86,11 +97,13 @@ static void die(const char *fmt, ...)
 
 static void usage(FILE *f)
 {
-	fputs("usage: msc [-c | -f FILE] [-o NAME] [-d SECONDS] [-p]\n"
+	fputs("usage: msc [-c | -f FILE] [-r] [-o NAME] [-d SECONDS] [-p]\n"
 		"       msc -l | -v\n"
 		"  (none)     to Screenshots/ in the pictures folder, prints the path\n"
 		"  -c         to the clipboard, as image/png\n"
 		"  -f FILE    to FILE, - for stdout\n"
+		"  -r         a rectangle: drag it with the mouse, a click takes the\n"
+		"             monitor, Esc or the right button gives up\n"
 		"  -o NAME    only that monitor\n"
 		"  -d SECONDS wait that long first\n"
 		"  -p         with the mouse pointer\n"
@@ -191,14 +204,30 @@ static uint32_t min_u32(uint32_t a, uint32_t b)
 	return a < b ? a : b;
 }
 
+static void seat_capabilities(void *data, struct wl_seat *wl, uint32_t caps)
+{
+	seat_caps = caps;
+}
+
+static void seat_name(void *data, struct wl_seat *wl, const char *name)
+{
+}
+
+static const struct wl_seat_listener seat_listener = {
+	.capabilities = seat_capabilities,
+	.name = seat_name,
+};
+
 static void registry_global(void *data, struct wl_registry *registry, uint32_t name,
 	const char *interface, uint32_t version)
 {
 	if (strcmp(interface, wl_shm_interface.name) == 0) {
 		shm = wl_registry_bind(registry, name, &wl_shm_interface, 1);
 	} else if (strcmp(interface, wl_seat_interface.name) == 0) {
-		if (!seat)
+		if (!seat) {
 			seat = wl_registry_bind(registry, name, &wl_seat_interface, 1);
+			wl_seat_add_listener(seat, &seat_listener, NULL);
+		}
 	} else if (strcmp(interface, wl_output_interface.name) == 0) {
 		if (n_outputs == MAX_OUTPUTS)
 			return;
@@ -219,6 +248,14 @@ static void registry_global(void *data, struct wl_registry *registry, uint32_t n
 	} else if (strcmp(interface, ext_data_control_manager_v1_interface.name) == 0) {
 		data_control = wl_registry_bind(registry, name,
 			&ext_data_control_manager_v1_interface, 1);
+	} else if (strcmp(interface, wl_compositor_interface.name) == 0) {
+		compositor = wl_registry_bind(registry, name, &wl_compositor_interface,
+			min_u32(version, 4));
+	} else if (strcmp(interface, zwlr_layer_shell_v1_interface.name) == 0) {
+		layer_shell = wl_registry_bind(registry, name, &zwlr_layer_shell_v1_interface,
+			min_u32(version, 4));
+	} else if (strcmp(interface, wp_viewporter_interface.name) == 0) {
+		viewporter = wl_registry_bind(registry, name, &wp_viewporter_interface, 1);
 	}
 }
 
@@ -239,6 +276,10 @@ static void forget_globals(void)
 	screencopy = NULL;
 	xdg_output_manager = NULL;
 	data_control = NULL;
+	compositor = NULL;
+	layer_shell = NULL;
+	viewporter = NULL;
+	seat_caps = 0;
 	n_outputs = 0;
 }
 
@@ -531,8 +572,11 @@ static double output_scale(const struct output *o)
 	return w > 0 ? (double)tw / w : 1;
 }
 
+/* Once per capture: compose() may take an output more than once. */
 static void swap_red_blue(struct output *o)
 {
+	if (o->format != WL_SHM_FORMAT_XBGR8888 && o->format != WL_SHM_FORMAT_ABGR8888)
+		return;
 	for (uint32_t y = 0; y < o->height; y++) {
 		uint32_t *row = (uint32_t *)((char *)o->data + (size_t)y * o->stride);
 		for (uint32_t x = 0; x < o->width; x++) {
@@ -545,9 +589,11 @@ static void swap_red_blue(struct output *o)
 /*
  * All the captured outputs in one picture, as they lie in the layout. A picture of
  * monitors with different scales gets the largest one, so none loses detail. What no
- * monitor covers stays black.
+ * monitor covers stays black. Where it begins in the layout and its pixels per logical
+ * pixel go to *origin_x, *origin_y and *scale_out.
  */
-static cairo_surface_t *compose(struct output **list, int n)
+static cairo_surface_t *compose(struct output **list, int n, int *origin_x, int *origin_y,
+	double *scale_out)
 {
 	int x0 = INT_MAX, y0 = INT_MAX, x1 = INT_MIN, y1 = INT_MIN;
 	double scale = 0;
@@ -573,8 +619,6 @@ static cairo_surface_t *compose(struct output **list, int n)
 
 	for (int i = 0; i < n; i++) {
 		struct output *o = list[i];
-		if (o->format == WL_SHM_FORMAT_XBGR8888 || o->format == WL_SHM_FORMAT_ABGR8888)
-			swap_red_blue(o);
 		/* Alpha on a screen means nothing: x or a, it is opaque. */
 		cairo_surface_t *src = cairo_image_surface_create_for_data(o->data,
 			CAIRO_FORMAT_RGB24, o->width, o->height, o->stride);
@@ -598,6 +642,464 @@ static cairo_surface_t *compose(struct output **list, int n)
 		cairo_restore(cr);
 		cairo_surface_destroy(src);
 	}
+	cairo_destroy(cr);
+	cairo_surface_flush(out);
+	*origin_x = x0;
+	*origin_y = y0;
+	*scale_out = scale;
+	return out;
+}
+
+/* ---- -r: the rectangle -------------------------------------------------------------- */
+
+/*
+ * The screen is captured first, and the still goes up on an overlay on every monitor,
+ * dimmed. The rectangle being dragged shows it as it is. So nothing moves while the
+ * rectangle is drawn, and the overlay is never in the picture.
+ */
+
+struct shmbuf {
+	struct wl_buffer *wl;
+	void *data;
+	size_t size;
+	int w, h;
+	bool busy;
+};
+
+struct overlay {
+	struct output *o;
+	cairo_surface_t *still;         /* the monitor as captured, in buffer pixels */
+	double scale;                   /* its pixels per logical pixel */
+	struct wl_surface *surface;
+	struct zwlr_layer_surface_v1 *layer;
+	struct wp_viewport *viewport;
+	struct wl_callback *frame;
+	bool configured, dirty;
+	struct shmbuf bufs[2];
+};
+
+enum sel_state { SEL_WAIT, SEL_DRAG, SEL_DONE, SEL_CANCEL };
+
+static struct {
+	struct overlay ov[MAX_OUTPUTS];
+	int n;
+	enum sel_state state;
+	struct overlay *under;          /* the overlay the pointer is on */
+	double px, py;                  /* the pointer, in the layout */
+	double ax, ay;                  /* where the drag began */
+	struct wl_pointer *pointer;
+	struct wl_keyboard *keyboard;
+	struct wl_cursor_theme *cursor_theme;
+	struct wl_cursor_image *cursor;
+	struct wl_surface *cursor_surface;
+	int cursor_scale;
+} sel;
+
+static void buffer_release(void *data, struct wl_buffer *wl)
+{
+	struct shmbuf *b = data;
+	b->busy = false;
+}
+
+static const struct wl_buffer_listener buffer_listener = {
+	.release = buffer_release,
+};
+
+static struct shmbuf *free_buffer(struct overlay *ov, int w, int h)
+{
+	for (int i = 0; i < 2; i++) {
+		struct shmbuf *b = &ov->bufs[i];
+		if (b->busy)
+			continue;
+		if (b->wl && (b->w != w || b->h != h)) {
+			wl_buffer_destroy(b->wl);
+			munmap(b->data, b->size);
+			b->wl = NULL;
+		}
+		if (!b->wl) {
+			b->size = (size_t)w * 4 * h;
+			int fd = shm_file(b->size);
+			b->data = mmap(NULL, b->size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+			if (b->data == MAP_FAILED)
+				die("mmap: %s", strerror(errno));
+			struct wl_shm_pool *pool = wl_shm_create_pool(shm, fd, b->size);
+			b->wl = wl_shm_pool_create_buffer(pool, 0, w, h, w * 4,
+				WL_SHM_FORMAT_XRGB8888);
+			wl_shm_pool_destroy(pool);
+			close(fd);
+			wl_buffer_add_listener(b->wl, &buffer_listener, b);
+			b->w = w;
+			b->h = h;
+		}
+		return b;
+	}
+	return NULL;
+}
+
+/* The rectangle in the layout, from the drag. */
+static void drag_box(double *x, double *y, double *w, double *h)
+{
+	*x = fmin(sel.ax, sel.px);
+	*y = fmin(sel.ay, sel.py);
+	*w = fabs(sel.px - sel.ax);
+	*h = fabs(sel.py - sel.ay);
+}
+
+static void frame_done(void *data, struct wl_callback *cb, uint32_t time);
+static const struct wl_callback_listener frame_cb_listener = {
+	.done = frame_done,
+};
+
+static void draw(struct overlay *ov)
+{
+	int w = cairo_image_surface_get_width(ov->still);
+	int h = cairo_image_surface_get_height(ov->still);
+	struct shmbuf *b = free_buffer(ov, w, h);
+	if (!b) {
+		ov->dirty = true;
+		return;
+	}
+	ov->dirty = false;
+	cairo_surface_t *cs = cairo_image_surface_create_for_data(b->data,
+		CAIRO_FORMAT_RGB24, w, h, w * 4);
+	cairo_t *cr = cairo_create(cs);
+	cairo_set_source_surface(cr, ov->still, 0, 0);
+	cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_NEAREST);
+	cairo_paint(cr);
+	cairo_set_source_rgba(cr, 0, 0, 0, 0.5);
+	cairo_paint(cr);
+
+	if (sel.state == SEL_DRAG) {
+		int lx, ly, lw, lh;
+		logical_box(ov->o, &lx, &ly, &lw, &lh);
+		double x, y, rw, rh;
+		drag_box(&x, &y, &rw, &rh);
+		/* On whole pixels, as cut() will: the ones the pointer is on. */
+		double x0 = floor((x - lx) * ov->scale), y0 = floor((y - ly) * ov->scale);
+		double x1 = floor((x + rw - lx) * ov->scale);
+		double y1 = floor((y + rh - ly) * ov->scale);
+		cairo_rectangle(cr, x0, y0, x1 - x0, y1 - y0);
+		cairo_save(cr);
+		cairo_clip(cr);
+		cairo_set_source_surface(cr, ov->still, 0, 0);
+		cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_NEAREST);
+		cairo_paint(cr);
+		cairo_restore(cr);
+		/* The border lies outside, so the picture shows unchanged within. */
+		double lw_px = fmax(1, round(ov->scale));
+		cairo_set_line_width(cr, lw_px);
+		cairo_rectangle(cr, x0 - lw_px / 2, y0 - lw_px / 2, x1 - x0 + lw_px,
+			y1 - y0 + lw_px);
+		cairo_set_source_rgb(cr, 1, 1, 1);
+		cairo_stroke(cr);
+	}
+	cairo_destroy(cr);
+	cairo_surface_destroy(cs);
+
+	wl_surface_attach(ov->surface, b->wl, 0, 0);
+	wl_surface_damage_buffer(ov->surface, 0, 0, w, h);
+	ov->frame = wl_surface_frame(ov->surface);
+	wl_callback_add_listener(ov->frame, &frame_cb_listener, ov);
+	wl_surface_commit(ov->surface);
+	b->busy = true;
+}
+
+static void frame_done(void *data, struct wl_callback *cb, uint32_t time)
+{
+	struct overlay *ov = data;
+	wl_callback_destroy(cb);
+	ov->frame = NULL;
+	if (ov->dirty)
+		draw(ov);
+}
+
+/* A new frame wherever the compositor is ready for one, later where it is not. */
+static void redraw_all(void)
+{
+	for (int i = 0; i < sel.n; i++) {
+		struct overlay *ov = &sel.ov[i];
+		ov->dirty = true;
+		if (ov->configured && !ov->frame)
+			draw(ov);
+	}
+}
+
+static void layer_configure(void *data, struct zwlr_layer_surface_v1 *layer,
+	uint32_t serial, uint32_t w, uint32_t h)
+{
+	struct overlay *ov = data;
+	zwlr_layer_surface_v1_ack_configure(layer, serial);
+	if (ov->viewport && w > 0 && h > 0)
+		wp_viewport_set_destination(ov->viewport, w, h);
+	ov->configured = true;
+	if (!ov->frame)
+		draw(ov);
+}
+
+static void layer_closed(void *data, struct zwlr_layer_surface_v1 *layer)
+{
+	sel.state = SEL_CANCEL;
+}
+
+static const struct zwlr_layer_surface_v1_listener layer_listener = {
+	.configure = layer_configure,
+	.closed = layer_closed,
+};
+
+static struct overlay *overlay_of(struct wl_surface *surface)
+{
+	for (int i = 0; i < sel.n; i++)
+		if (sel.ov[i].surface == surface)
+			return &sel.ov[i];
+	return NULL;
+}
+
+static void pointer_enter(void *data, struct wl_pointer *p, uint32_t serial,
+	struct wl_surface *surface, wl_fixed_t sx, wl_fixed_t sy)
+{
+	sel.under = overlay_of(surface);
+	if (!sel.under)
+		return;
+	int lx, ly, lw, lh;
+	logical_box(sel.under->o, &lx, &ly, &lw, &lh);
+	sel.px = lx + wl_fixed_to_double(sx);
+	sel.py = ly + wl_fixed_to_double(sy);
+	if (sel.cursor)
+		wl_pointer_set_cursor(p, serial, sel.cursor_surface,
+			sel.cursor->hotspot_x / sel.cursor_scale,
+			sel.cursor->hotspot_y / sel.cursor_scale);
+}
+
+static void pointer_leave(void *data, struct wl_pointer *p, uint32_t serial,
+	struct wl_surface *surface)
+{
+	/* During a drag the pointer stays with the overlay it began on. */
+	if (sel.state != SEL_DRAG)
+		sel.under = NULL;
+}
+
+static void pointer_motion(void *data, struct wl_pointer *p, uint32_t time,
+	wl_fixed_t sx, wl_fixed_t sy)
+{
+	if (!sel.under)
+		return;
+	int lx, ly, lw, lh;
+	logical_box(sel.under->o, &lx, &ly, &lw, &lh);
+	sel.px = lx + wl_fixed_to_double(sx);
+	sel.py = ly + wl_fixed_to_double(sy);
+	if (sel.state == SEL_DRAG)
+		redraw_all();
+}
+
+static void pointer_button(void *data, struct wl_pointer *p, uint32_t serial,
+	uint32_t time, uint32_t button, uint32_t state)
+{
+	bool down = state == WL_POINTER_BUTTON_STATE_PRESSED;
+	if (button == BTN_LEFT && down && sel.state == SEL_WAIT && sel.under) {
+		sel.ax = sel.px;
+		sel.ay = sel.py;
+		sel.state = SEL_DRAG;
+		redraw_all();
+	} else if (button == BTN_LEFT && !down && sel.state == SEL_DRAG) {
+		sel.state = SEL_DONE;
+	} else if (button != BTN_LEFT && down) {
+		sel.state = SEL_CANCEL;
+	}
+}
+
+static void pointer_axis(void *data, struct wl_pointer *p, uint32_t time,
+	uint32_t axis, wl_fixed_t value)
+{
+}
+
+static const struct wl_pointer_listener pointer_listener = {
+	.enter = pointer_enter,
+	.leave = pointer_leave,
+	.motion = pointer_motion,
+	.button = pointer_button,
+	.axis = pointer_axis,
+};
+
+static void keyboard_keymap(void *data, struct wl_keyboard *k, uint32_t format,
+	int32_t fd, uint32_t size)
+{
+	close(fd);
+}
+
+static void keyboard_enter(void *data, struct wl_keyboard *k, uint32_t serial,
+	struct wl_surface *surface, struct wl_array *keys)
+{
+}
+
+static void keyboard_leave(void *data, struct wl_keyboard *k, uint32_t serial,
+	struct wl_surface *surface)
+{
+}
+
+/* Esc by its evdev code: whatever the layout, it is that key. */
+static void keyboard_key(void *data, struct wl_keyboard *k, uint32_t serial,
+	uint32_t time, uint32_t key, uint32_t state)
+{
+	if (key == KEY_ESC && state == WL_KEYBOARD_KEY_STATE_PRESSED)
+		sel.state = SEL_CANCEL;
+}
+
+static void keyboard_modifiers(void *data, struct wl_keyboard *k, uint32_t serial,
+	uint32_t depressed, uint32_t latched, uint32_t locked, uint32_t group)
+{
+}
+
+static const struct wl_keyboard_listener keyboard_listener = {
+	.keymap = keyboard_keymap,
+	.enter = keyboard_enter,
+	.leave = keyboard_leave,
+	.key = keyboard_key,
+	.modifiers = keyboard_modifiers,
+};
+
+/* The crosshair from the cursor theme, as large as the sharpest monitor wants. */
+static void load_cursor(void)
+{
+	double scale = 1;
+	for (int i = 0; i < sel.n; i++)
+		scale = fmax(scale, sel.ov[i].scale);
+	sel.cursor_scale = (int)ceil(scale);
+	const char *size_env = getenv("XCURSOR_SIZE");
+	int size = size_env && atoi(size_env) > 0 ? atoi(size_env) : 24;
+	sel.cursor_theme = wl_cursor_theme_load(getenv("XCURSOR_THEME"),
+		size * sel.cursor_scale, shm);
+	if (!sel.cursor_theme)
+		return;
+	const char *names[] = { "crosshair", "cross", "tcross", "left_ptr", "default" };
+	struct wl_cursor *c = NULL;
+	for (size_t i = 0; !c && i < sizeof(names) / sizeof(*names); i++)
+		c = wl_cursor_theme_get_cursor(sel.cursor_theme, names[i]);
+	if (!c || c->image_count == 0)
+		return;
+	sel.cursor = c->images[0];
+	sel.cursor_surface = wl_compositor_create_surface(compositor);
+	wl_surface_set_buffer_scale(sel.cursor_surface, sel.cursor_scale);
+	wl_surface_attach(sel.cursor_surface, wl_cursor_image_get_buffer(sel.cursor), 0, 0);
+	wl_surface_commit(sel.cursor_surface);
+}
+
+/*
+ * Shows the still and lets the mouse draw a rectangle on it. Returns false when given
+ * up. A click without a drag takes the monitor it is on.
+ */
+static bool select_rectangle(struct output **list, int n, double *x, double *y,
+	double *w, double *h)
+{
+	if (!compositor || !layer_shell)
+		die("-r needs wlr-layer-shell, which the compositor does not offer");
+	if (!seat || !(seat_caps & WL_SEAT_CAPABILITY_POINTER))
+		die("-r needs a mouse, and the compositor has none");
+
+	memset(&sel, 0, sizeof(sel));
+	sel.n = n;
+	for (int i = 0; i < n; i++) {
+		struct overlay *ov = &sel.ov[i];
+		int ox, oy;
+		ov->o = list[i];
+		ov->still = compose(&list[i], 1, &ox, &oy, &ov->scale);
+		ov->surface = wl_compositor_create_surface(compositor);
+		if (viewporter)
+			ov->viewport = wp_viewporter_get_viewport(viewporter, ov->surface);
+		else
+			wl_surface_set_buffer_scale(ov->surface, (int)round(ov->scale));
+		ov->layer = zwlr_layer_shell_v1_get_layer_surface(layer_shell, ov->surface,
+			ov->o->wl, ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY, "msc");
+		zwlr_layer_surface_v1_add_listener(ov->layer, &layer_listener, ov);
+		zwlr_layer_surface_v1_set_anchor(ov->layer,
+			ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP | ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM |
+			ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT | ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT);
+		zwlr_layer_surface_v1_set_exclusive_zone(ov->layer, -1);
+		/* For Esc: exclusive, or the key would go to the window under it. */
+		zwlr_layer_surface_v1_set_keyboard_interactivity(ov->layer, 1);
+		wl_surface_commit(ov->surface);
+	}
+	load_cursor();
+	sel.pointer = wl_seat_get_pointer(seat);
+	wl_pointer_add_listener(sel.pointer, &pointer_listener, NULL);
+	if (seat_caps & WL_SEAT_CAPABILITY_KEYBOARD) {
+		sel.keyboard = wl_seat_get_keyboard(seat);
+		wl_keyboard_add_listener(sel.keyboard, &keyboard_listener, NULL);
+	}
+
+	while (sel.state == SEL_WAIT || sel.state == SEL_DRAG)
+		if (wl_display_dispatch(display) < 0)
+			die("lost the compositor");
+
+	bool done = sel.state == SEL_DONE;
+	if (done) {
+		drag_box(x, y, w, h);
+		if (*w < 1 && *h < 1 && sel.under) {
+			int lx, ly, lw, lh;
+			logical_box(sel.under->o, &lx, &ly, &lw, &lh);
+			*x = lx;
+			*y = ly;
+			*w = lw;
+			*h = lh;
+		}
+	}
+
+	/* Gone before anything else happens, so no frame of it lingers. */
+	wl_pointer_destroy(sel.pointer);
+	if (sel.keyboard)
+		wl_keyboard_destroy(sel.keyboard);
+	for (int i = 0; i < n; i++) {
+		struct overlay *ov = &sel.ov[i];
+		if (ov->frame)
+			wl_callback_destroy(ov->frame);
+		if (ov->viewport)
+			wp_viewport_destroy(ov->viewport);
+		zwlr_layer_surface_v1_destroy(ov->layer);
+		wl_surface_destroy(ov->surface);
+		for (int j = 0; j < 2; j++) {
+			if (ov->bufs[j].wl) {
+				wl_buffer_destroy(ov->bufs[j].wl);
+				munmap(ov->bufs[j].data, ov->bufs[j].size);
+			}
+		}
+		cairo_surface_destroy(ov->still);
+	}
+	if (sel.cursor_surface)
+		wl_surface_destroy(sel.cursor_surface);
+	if (sel.cursor_theme)
+		wl_cursor_theme_destroy(sel.cursor_theme);
+	if (wl_display_roundtrip(display) < 0)
+		die("lost the compositor");
+	return done;
+}
+
+/*
+ * The piece of the picture that the rectangle covers, in the layout's coordinates. An edge
+ * goes to the pixel the pointer is on: a pointer at 100.5 is on pixel 100.
+ */
+static cairo_surface_t *cut(cairo_surface_t *picture, int origin_x, int origin_y,
+	double scale, double x, double y, double w, double h)
+{
+	int pw = cairo_image_surface_get_width(picture);
+	int ph = cairo_image_surface_get_height(picture);
+	int x0 = (int)floor((x - origin_x) * scale), y0 = (int)floor((y - origin_y) * scale);
+	int x1 = (int)floor((x + w - origin_x) * scale);
+	int y1 = (int)floor((y + h - origin_y) * scale);
+	x0 = x0 < 0 ? 0 : x0 > pw ? pw : x0;
+	x1 = x1 < 0 ? 0 : x1 > pw ? pw : x1;
+	y0 = y0 < 0 ? 0 : y0 > ph ? ph : y0;
+	y1 = y1 < 0 ? 0 : y1 > ph ? ph : y1;
+	/* A drag of a hair still gets a pixel. */
+	if (x1 == x0 && x1 < pw)
+		x1++;
+	if (y1 == y0 && y1 < ph)
+		y1++;
+	if (x1 <= x0 || y1 <= y0)
+		die("the rectangle lies outside every monitor");
+	cairo_surface_t *out = cairo_image_surface_create(CAIRO_FORMAT_RGB24, x1 - x0,
+		y1 - y0);
+	cairo_t *cr = cairo_create(out);
+	cairo_set_source_surface(cr, picture, -x0, -y0);
+	cairo_paint(cr);
 	cairo_destroy(cr);
 	cairo_surface_flush(out);
 	return out;
@@ -918,11 +1420,11 @@ static void list_outputs(void)
 
 int main(int argc, char *argv[])
 {
-	bool clipboard = false, pointer = false, list = false;
+	bool clipboard = false, pointer = false, list = false, region = false;
 	const char *file = NULL, *only = NULL;
 	double delay = 0;
 	int opt;
-	while ((opt = getopt(argc, argv, "cf:o:d:plvh")) != -1) {
+	while ((opt = getopt(argc, argv, "cf:o:d:plrvh")) != -1) {
 		switch (opt) {
 		case 'c':
 			clipboard = true;
@@ -947,6 +1449,9 @@ int main(int argc, char *argv[])
 			break;
 		case 'l':
 			list = true;
+			break;
+		case 'r':
+			region = true;
 			break;
 		case 'v':
 			printf("msc %s\n", MSC_VERSION);
@@ -1008,8 +1513,20 @@ int main(int argc, char *argv[])
 	for (int i = 0; i < n; i++)
 		if (chosen[i]->failed)
 			return 1;
+	for (int i = 0; i < n; i++)
+		swap_red_blue(chosen[i]);
 
-	cairo_surface_t *picture = compose(chosen, n);
+	int origin_x, origin_y;
+	double scale;
+	cairo_surface_t *picture = compose(chosen, n, &origin_x, &origin_y, &scale);
+	if (region) {
+		double x, y, w, h;
+		if (!select_rectangle(chosen, n, &x, &y, &w, &h))
+			die("given up, no screenshot");
+		cairo_surface_t *piece = cut(picture, origin_x, origin_y, scale, x, y, w, h);
+		cairo_surface_destroy(picture);
+		picture = piece;
+	}
 	struct mem png = { 0 };
 	encode_png(picture, &png);
 	cairo_surface_destroy(picture);

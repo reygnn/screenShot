@@ -17,6 +17,11 @@ done
 cd "$MWC_DIR" || exit 1
 . tests/lib.sh
 require_tools grim
+for tool in build/vinput build/pngtool; do
+	[ -x "$tool" ] || { echo "FAIL: $MWC_DIR/$tool not built (make $tool)"; exit 1; }
+done
+# For the simulated mouse and keyboard.
+export MWC_TEST_STATE=$SMOKE_DIR/state
 
 export HOME=$SMOKE_DIR/home
 mkdir -p "$HOME" "$XDG_CONFIG_HOME/mwc"
@@ -42,7 +47,11 @@ same_as_grim() {
 	shift 2
 	WAYLAND_DISPLAY=wayland-0 grim "$@" "$SMOKE_DIR/grim.png" 2>>"$LOG" ||
 		fail "$what: grim failed"
-	diff=$("$PNGCMP" same "$SMOKE_DIR/grim.png" "$file") || fail "$what: $diff"
+	if ! diff=$("$PNGCMP" same "$SMOKE_DIR/grim.png" "$file"); then
+		cp "$SMOKE_DIR/grim.png" "$MSC_DIR/build/fail-grim.png"
+		cp "$file" "$MSC_DIR/build/fail-msc.png"
+		fail "$what: $diff (pictures in build/fail-*.png)"
+	fi
 	echo "ok: $what"
 }
 
@@ -173,6 +182,107 @@ for ((i = 0; i < 25; i++)); do
 done
 check "the clipboard msc ends with the compositor" "[ \"\$(msc_count)\" = 0 ]"
 
+# ---- -r: a rectangle ---------------------------------------------------------------------
+
+# region_start [args...]: msc -r in the background, until its still is up. The red
+# quarter at 600,50 is dimmed then.
+region_start() {
+	WAYLAND_DISPLAY=wayland-0 "$MSC" -r "$@" >"$SMOKE_DIR/r.out" 2>"$MSC_ERR" &
+	RPID=$!
+	local i got
+	for ((i = 0; i < 50; i++)); do
+		if WAYLAND_DISPLAY=wayland-0 grim "$SMOKE_DIR/r-shot.png" 2>/dev/null; then
+			got=$(build/pngtool pixel "$SMOKE_DIR/r-shot.png" "${DIM_X:-600}" "${DIM_Y:-50}")
+			[[ $got == 7f0000 || $got == 800000 ]] && { echo "ok: -r: the still is up, dimmed"; return 0; }
+		fi
+		sleep 0.1
+	done
+	fail "-r: no dimmed still (pixel is ${got:-unreadable})"
+}
+
+# region_end: waits for msc -r to end, its status in $STATUS, its stdout in $OUT.
+region_end() {
+	local i
+	for ((i = 0; i < 50; i++)); do
+		kill -0 "$RPID" 2>/dev/null || break
+		sleep 0.1
+	done
+	kill -0 "$RPID" 2>/dev/null && { kill "$RPID"; fail "-r did not end"; }
+	wait "$RPID"
+	STATUS=$?
+	OUT=$(cat "$SMOKE_DIR/r.out")
+	cat "$MSC_ERR" >>"$LOG"
+}
+
+pixel_now() { # <x> <y>
+	WAYLAND_DISPLAY=wayland-0 grim "$SMOKE_DIR/now.png" 2>/dev/null &&
+		build/pngtool pixel "$SMOKE_DIR/now.png" "$1" "$2"
+}
+
+begin
+start_vinput
+region_start -f "$SMOKE_DIR/r.png"
+do_input move 100 100
+do_input down left
+do_input move 400 300
+for ((i = 0; i < 50; i++)); do
+	[ "$(pixel_now 200 150)" = ff0000 ] && break
+	sleep 0.1
+done
+check "-r: within the rectangle the still is as it is" "[ \"\$(pixel_now 200 150)\" = ff0000 ]"
+check "-r: outside it stays dimmed" "[[ \"\$(pixel_now 600 50)\" == 7f0000 || \"\$(pixel_now 600 50)\" == 800000 ]]"
+do_input up left
+region_end
+check "-r: status 0 after the drag" "[ $STATUS = 0 ]"
+check "-r: prints the path" "[ \"\$OUT\" = \"$SMOKE_DIR/r.png\" ]"
+pixel_is "-r: the still is gone afterwards" 600 50 ff0000
+same_as_grim "-r: the rectangle, the same as grim's" "$SMOKE_DIR/r.png" -g "100,100 300x200"
+
+region_start -f "$SMOKE_DIR/r2.png"
+do_input move 400 300
+do_input down left
+do_input move 100 100
+do_input up left
+region_end
+same_as_grim "-r: dragged the other way, the same rectangle" "$SMOKE_DIR/r2.png" -g "100,100 300x200"
+
+region_start -f "$SMOKE_DIR/r3.png"
+do_input move 700 500
+do_input click left
+region_end
+check "-r: a click without a drag: status 0" "[ $STATUS = 0 ]"
+same_as_grim "-r: a click takes the whole monitor" "$SMOKE_DIR/r3.png"
+
+region_start -f "$SMOKE_DIR/esc.png"
+do_input move 100 100
+do_input down left
+do_input move 300 300
+do_input key Escape
+region_end
+do_input up left
+check "-r: Esc gives up, status 1" "[ $STATUS = 1 ]"
+check "... and says so" "grep -q 'given up' \"$MSC_ERR\""
+check "... and writes nothing" "[ ! -e \"$SMOKE_DIR/esc.png\" ]"
+pixel_is "-r: the still is gone after Esc" 600 50 ff0000
+
+region_start -f "$SMOKE_DIR/right.png"
+do_input move 100 100
+do_input click right
+region_end
+check "-r: the right button gives up, status 1" "[ $STATUS = 1 ] && [ ! -e \"$SMOKE_DIR/right.png\" ]"
+
+region_start -c
+do_input move 50 60
+do_input down left
+do_input move 250 160
+do_input up left
+region_end
+check "-r -c: status 0" "[ $STATUS = 0 ]"
+WAYLAND_DISPLAY=wayland-0 "$CLIPGET" image/png >"$SMOKE_DIR/rclip.png" 2>>"$LOG"
+same_as_grim "-r -c: the rectangle in the clipboard" "$SMOKE_DIR/rclip.png" -g "50,60 200x100"
+stop_vinput
+stop_mwc
+
 # ---- turned, scaled and several monitors -------------------------------------------------------
 
 for t in 90 180 270 flipped flipped-90 flipped-180 flipped-270; do
@@ -191,6 +301,21 @@ check "scale 2: every pixel of the monitor" "[ \"\$(\"$PNGCMP\" size \"$SMOKE_DI
 same_as_grim "scale 2: the same as grim" "$SMOKE_DIR/s.png"
 run_msc -l
 check "-l at scale 2: logical size" "[ \"\$OUT\" = 'HEADLESS-1 640x360+0+0 scale 2' ]"
+start_vinput 640 360
+DIM_X=600 DIM_Y=50 region_start -f "$SMOKE_DIR/rs.png"
+do_input move 100 100
+do_input down left
+do_input move 300 200
+do_input up left
+region_end
+check "-r at scale 2: every pixel of the rectangle" "[ \"\$(\"$PNGCMP\" size \"$SMOKE_DIR/rs.png\")\" = 400x200 ]"
+# The pointer is at 100.5 logical, on pixel 201: msc cuts there, finer than grim -g.
+WAYLAND_DISPLAY=wayland-0 grim "$SMOKE_DIR/full2.png" 2>>"$LOG"
+"$PNGCMP" crop "$SMOKE_DIR/full2.png" 201 201 400 200 "$SMOKE_DIR/want2.png"
+diff=$("$PNGCMP" same "$SMOKE_DIR/want2.png" "$SMOKE_DIR/rs.png") ||
+	fail "-r at scale 2: on the pixels the pointer was on: $diff"
+echo "ok: -r at scale 2: on the pixels the pointer was on, not rounded to the logical ones"
+stop_vinput
 stop_mwc
 rm "$XDG_CONFIG_HOME/mwc/mwmrc"
 
@@ -205,6 +330,16 @@ run_msc -l
 second=$(echo "$OUT" | sed -n 2p | cut -d' ' -f1)
 run_msc -o "$second" -f "$SMOKE_DIR/second.png"
 same_as_grim "-o $second: only that one" "$SMOKE_DIR/second.png" -o "$second"
+start_vinput 2560 720
+region_start -f "$SMOKE_DIR/rtwo.png"
+do_input move 1200 100
+do_input down left
+do_input move 1400 300
+do_input up left
+region_end
+check "-r across two monitors: status 0" "[ $STATUS = 0 ]"
+same_as_grim "-r across two monitors: the same as grim's" "$SMOKE_DIR/rtwo.png" -g "1200,100 200x200"
+stop_vinput
 stop_mwc
 unset WLR_HEADLESS_OUTPUTS
 

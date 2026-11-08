@@ -5,6 +5,7 @@
  *                          copy of it is never the same
  *   pngcmp same A B        exit 0 if both have the same size and pixels
  *   pngcmp size FILE       prints WxH
+ *   pngcmp crop IN X Y W H OUT   that piece of IN, in its pixels
  */
 #include <cairo.h>
 #include <stdint.h>
@@ -76,8 +77,22 @@ static int same(const char *a, const char *b)
 	return 0;
 }
 
+static int crop(const char *in, int x, int y, int w, int h, const char *out)
+{
+	cairo_surface_t *src = load(in);
+	cairo_surface_t *dst = cairo_image_surface_create(CAIRO_FORMAT_RGB24, w, h);
+	cairo_t *cr = cairo_create(dst);
+	cairo_set_source_surface(cr, src, -x, -y);
+	cairo_paint(cr);
+	cairo_destroy(cr);
+	return cairo_surface_write_to_png(dst, out) == CAIRO_STATUS_SUCCESS ? 0 : 1;
+}
+
 int main(int argc, char *argv[])
 {
+	if (argc == 8 && strcmp(argv[1], "crop") == 0)
+		return crop(argv[2], atoi(argv[3]), atoi(argv[4]), atoi(argv[5]), atoi(argv[6]),
+			argv[7]);
 	if (argc == 5 && strcmp(argv[1], "gen") == 0)
 		return gen(argv[2], atoi(argv[3]), atoi(argv[4]));
 	if (argc == 4 && strcmp(argv[1], "same") == 0)
@@ -88,6 +103,6 @@ int main(int argc, char *argv[])
 			cairo_image_surface_get_height(s));
 		return 0;
 	}
-	fprintf(stderr, "usage: pngcmp gen OUT W H | same A B | size FILE\n");
+	fprintf(stderr, "usage: pngcmp gen OUT W H | same A B | size FILE | crop IN X Y W H OUT\n");
 	return 2;
 }
