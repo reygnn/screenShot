@@ -341,6 +341,34 @@ same_as_grim "-r -c: the rectangle in the clipboard" "$SMOKE_DIR/rclip.png" -g "
 stop_vinput
 stop_mwc
 
+# ---- -p: the pointer -----------------------------------------------------------------------
+
+# On the headless backend the pointer is a hardware cursor, so without -p it is not in
+# the picture at all, and with -p the compositor paints it in. Its tip is at 400,300, in
+# the red quarter.
+begin
+start_vinput
+do_input move 400 300
+run_shot -f "$SMOKE_DIR/nop.png"
+check "without -p: no pointer, only the wallpaper" "\"$PNGCMP\" same \"$SMOKE_DIR/nop.png\" \"$WALL\""
+run_shot -p -f "$SMOKE_DIR/p.png"
+check "-p: status 0" "[ $STATUS = 0 ]"
+check "-p: the pointer is in the picture" "! \"$PNGCMP\" same \"$SMOKE_DIR/p.png\" \"$WALL\" >/dev/null"
+"$PNGCMP" crop "$SMOKE_DIR/p.png" 300 200 200 200 "$SMOKE_DIR/p-near.png"
+"$PNGCMP" crop "$WALL" 300 200 200 200 "$SMOKE_DIR/wall-near.png"
+check "... where the pointer is" "! \"$PNGCMP\" same \"$SMOKE_DIR/p-near.png\" \"$SMOKE_DIR/wall-near.png\" >/dev/null"
+"$PNGCMP" crop "$SMOKE_DIR/p.png" 640 0 640 720 "$SMOKE_DIR/p-far.png"
+"$PNGCMP" crop "$WALL" 640 0 640 720 "$SMOKE_DIR/wall-far.png"
+check "... and nowhere else" "\"$PNGCMP\" same \"$SMOKE_DIR/p-far.png\" \"$SMOKE_DIR/wall-far.png\""
+same_as_grim "-p: the same as grim -c" "$SMOKE_DIR/p.png" -c
+do_input move 900 500
+run_shot -p -f "$SMOKE_DIR/p2.png"
+"$PNGCMP" crop "$SMOKE_DIR/p2.png" 300 200 200 200 "$SMOKE_DIR/p2-near.png"
+check "-p: the pointer follows the mouse" "\"$PNGCMP\" same \"$SMOKE_DIR/p2-near.png\" \"$SMOKE_DIR/wall-near.png\""
+same_as_grim "-p at its new place: the same as grim -c" "$SMOKE_DIR/p2.png" -c
+stop_vinput
+stop_mwc
+
 # ---- turned, scaled and several monitors -------------------------------------------------------
 
 for t in 90 180 270 flipped flipped-90 flipped-180 flipped-270; do
