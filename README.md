@@ -80,8 +80,8 @@ mouse. What the session sees is in CAVEATS.
 ## How this is built
 
 screenShot is developed with Claude (Anthropic) as a coding assistant. I set the
-scope and review the changes; Claude writes most of the code and the tests, see
-Testing. Known limits are written down in CAVEATS.
+scope and the design and review the changes; Claude writes most of the code and the
+tests, see Testing. Known limits are written down in CAVEATS.
 
 
 ## Testing
