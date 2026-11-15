@@ -39,8 +39,9 @@ In mwc, Print runs `screenShot` and Shift+Print `screenShot -c`. Other commands 
     Mwm*screenshot:            screenShot -r
     Mwm*clipboardScreenshot:   screenShot -c
 
-The pictures folder is `XDG_PICTURES_DIR` from `~/.config/user-dirs.dirs`, else
-`~/Pictures`; `Screenshots` in it is created when needed. Files are named
+The pictures folder is `XDG_PICTURES_DIR` from `user-dirs.dirs` in `$XDG_CONFIG_HOME`
+(by default `~/.config`), else `~/Pictures`; `Screenshots` in it is created when needed.
+New files get the mode the umask allows, 0644 under the usual 022. Files are named
 `Screenshot_2026-11-08_14-03-22.png`, a second one within the same second `..._2.png`.
 Nothing there is overwritten; `-f` replaces the file it is given. A file only shows up
 complete.
@@ -88,11 +89,13 @@ Testing. Known limits are written down in CAVEATS.
     make test
 
 runs `tests/build.sh`, which checks the Makefile, then screenShot in a headless mwc
-and compares every picture pixel for pixel with grim's: one monitor, all eight
-rotations and flips, scales 2 and 4, two monitors, the clipboard, the toast, the
-pictures folder, starting without `WAYLAND_DISPLAY`, and `-r` with mwc's simulated
-mouse and keyboard. It needs a built mwc in `MWC_DIR` (by default `../mwc`) with
-`build/vinput` and `build/pngtool`, and grim. mwc's development box has all of it:
+and compares its pictures pixel for pixel with grim's: one monitor, all eight
+rotations and flips, scale 2, two monitors, the clipboard and `-r` with mwc's
+simulated mouse and keyboard. It also checks the toast, the pictures folder, file
+modes, starting without `WAYLAND_DISPLAY`, a paste that is never read, `-l` at scale
+1.5 and the `-r` crosshair at scale 4. It needs a built mwc in `MWC_DIR` (by default
+`../mwc`) with `build/vinput` and `build/pngtool`, and grim. mwc's development box has
+all of it:
 
     distrobox enter mwc-dev -- make test
 

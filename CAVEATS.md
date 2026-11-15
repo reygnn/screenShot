@@ -13,6 +13,9 @@ one, so no monitor loses resolution and the others are scaled up.
 `-r` works on a still taken first, so menus and tooltips stay as they were, and the
 overlay is never in the picture.
 
+Only 8 bit shm formats are taken (XRGB, ARGB, XBGR, ABGR8888). A compositor that
+offers only 10 bit ones gets "no shm format".
+
 
 ## Clipboard
 
@@ -20,12 +23,37 @@ On Wayland the clipboard holds a promise, not data: whoever copied hands it over
 each paste. So `screenShot -c` returns at once but leaves a process in the background
 until something else is copied or the compositor exits.
 
+A paste whose reader takes no data for 5 seconds is given up, so a hung application
+can't block the next one. The reader gets a cut off PNG.
+
+Without `WAYLAND_DISPLAY` the sockets are tried in name order, so `wayland-10` comes
+before `wayland-2`.
+
 
 ## Cursor
 
 The crosshair of `-r` comes in the theme's sizes only. When the scale doesn't divide
 that size, it gets the largest buffer scale that does and the compositor scales it up.
 It is loaded once for the largest scale; the overlay is short lived.
+
+
+## -r
+
+mwc and most wlroots compositors have wp_viewporter. Without it the still is shown at
+the output's scale rounded to an integer, unchecked against its size: on a fractional
+scale it covers only part of the monitor, and a compositor that checks may reject an
+odd size.
+
+The overlay is drawn again on pointer motion. A second configure, or both buffers
+still held by the compositor, shows only once the pointer moves; wlroots does neither.
+
+A drag shorter than one logical pixel in both directions counts as a click.
+
+
+## Errors
+
+A compositor that breaks the connection during startup is reported as one without
+wlr-screencopy.
 
 
 ## Privacy
