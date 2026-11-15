@@ -3,6 +3,7 @@
  *
  *   clipget types          prints the offered types, one per line
  *   clipget TYPE           writes the clipboard as TYPE to stdout
+ *   clipget -s TYPE        asks for it, prints "asked" and never reads, until killed
  *
  * Exits 1 when the clipboard is empty or does not have that type.
  */
@@ -86,8 +87,14 @@ static const struct wl_registry_listener registry_listener = {
 
 int main(int argc, char *argv[])
 {
+	/* -s: ask for it and never read, like a hung application. */
+	bool stall = argc == 3 && strcmp(argv[1], "-s") == 0;
+	if (stall) {
+		argv++;
+		argc--;
+	}
 	if (argc != 2) {
-		fprintf(stderr, "usage: clipget types | TYPE\n");
+		fprintf(stderr, "usage: clipget types | [-s] TYPE\n");
 		return 2;
 	}
 	struct wl_display *display = wl_display_connect(NULL);
@@ -129,6 +136,12 @@ int main(int argc, char *argv[])
 	ext_data_control_offer_v1_receive(selection, argv[1], fds[1]);
 	wl_display_flush(display);
 	close(fds[1]);
+	if (stall) {
+		printf("asked\n");
+		fflush(stdout);
+		for (;;)
+			pause();
+	}
 	char buf[65536];
 	ssize_t n;
 	while ((n = read(fds[0], buf, sizeof(buf))) > 0)

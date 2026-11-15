@@ -72,6 +72,9 @@ begin() {
 	wait_for "the wallpaper is up" wallpaper_up
 }
 
+# clip [-s] <type>|types: pastes, but fails instead of hanging the test.
+clip() { WAYLAND_DISPLAY=wayland-0 timeout "$TIMEOUT" "$CLIPGET" "$@"; }
+
 # poll <description> <command...>: like wait_for, for when mwc may be gone.
 poll() {
 	local what=$1 i
@@ -92,6 +95,10 @@ expect "an unknown option: status 2" "[ $? = 2 ]"
 expect "-c and -f together: status 2" "[ $? = 2 ]"
 "$SHOT" -d soon >/dev/null 2>&1
 expect "-d wants a number" "[ $? = 2 ]"
+for d in "" nan 0x10 inf -1; do
+	"$SHOT" -d "$d" -l >/dev/null 2>&1
+	expect "-d '$d': status 2" "[ $? = 2 ]"
+done
 
 # ---- one monitor, a file ---------------------------------------------------------------
 
@@ -104,8 +111,11 @@ same_as_grim "-f: the same as grim" "$SMOKE_DIR/a.png"
 expect "-f: no temporary file is left" "[ -z \"\$(ls -A \"$SMOKE_DIR\" | grep '^\\.screenShot-')\" ]"
 (cd "$SMOKE_DIR" && WAYLAND_DISPLAY=wayland-0 "$SHOT" -q -f rel.png >"$SMOKE_DIR/rel.out" 2>>"$LOG")
 expect "-f with a relative path prints it absolute" "[ \"\$(cat \"$SMOKE_DIR/rel.out\")\" = \"$SMOKE_DIR/rel.png\" ]"
-run_shot -f "$SMOKE_DIR/a.png"
-expect "-f overwrites a file it is told to" "[ $STATUS = 0 ]"
+(umask 022 && run_shot -f "$SMOKE_DIR/a.png" && [ "$STATUS" = 0 ])
+expect "-f overwrites a file it is told to" "[ $? = 0 ]"
+expect "-f: mode 644 under umask 022" "[ \$(stat -c %a \"$SMOKE_DIR/a.png\") = 644 ]"
+(umask 077 && run_shot -f "$SMOKE_DIR/private.png")
+expect "-f: mode 600 under umask 077" "[ \$(stat -c %a \"$SMOKE_DIR/private.png\") = 600 ]"
 WAYLAND_DISPLAY=wayland-0 "$SHOT" -f - >"$SMOKE_DIR/stdout.png" 2>>"$LOG"
 expect "-f - writes the PNG to stdout" "\"$PNGCMP\" same \"$SMOKE_DIR/stdout.png\" \"$WALL\""
 run_shot -f "$SMOKE_DIR/no/such/dir/a.png"
@@ -189,15 +199,15 @@ shot_count() { test_shots | wc -l; }
 run_shot -c
 expect "-c: status 0, at once" "[ $STATUS = 0 ]"
 expect "-c: nothing on stdout" "[ -z \"\$OUT\" ]"
-expect "-c offers image/png" "[ \"\$(WAYLAND_DISPLAY=wayland-0 \"$CLIPGET\" types)\" = image/png ]"
-WAYLAND_DISPLAY=wayland-0 "$CLIPGET" image/png >"$SMOKE_DIR/clip.png" 2>>"$LOG"
+expect "-c offers image/png" "[ \"\$(clip types)\" = image/png ]"
+clip image/png >"$SMOKE_DIR/clip.png" 2>>"$LOG"
 same_as_grim "-c: what comes out of the clipboard is the screen" "$SMOKE_DIR/clip.png"
-WAYLAND_DISPLAY=wayland-0 "$CLIPGET" image/png >"$SMOKE_DIR/clip2.png" 2>>"$LOG"
+clip image/png >"$SMOKE_DIR/clip2.png" 2>>"$LOG"
 same_as_grim "it can be pasted again" "$SMOKE_DIR/clip2.png"
 expect "one screenShot stays behind for the clipboard" "[ \"\$(shot_count)\" = 1 ]"
 run_shot -c
 wait_for "a new copy ends the one before" test "$(shot_count)" = 1
-WAYLAND_DISPLAY=wayland-0 "$CLIPGET" image/png >"$SMOKE_DIR/clip3.png" 2>>"$LOG"
+clip image/png >"$SMOKE_DIR/clip3.png" 2>>"$LOG"
 same_as_grim "and the new one serves" "$SMOKE_DIR/clip3.png"
 
 # ---- the toast -----------------------------------------------------------------------------
@@ -209,7 +219,7 @@ toast_shown() { [ "$(pixel_now $TOAST_X $TOAST_Y)" = 2b2b2b ]; }
 toast_gone() { [ "$(pixel_now $TOAST_X $TOAST_Y)" = 00ff00 ]; }
 ms() { echo $(($(date +%s%N) / 1000000)); }
 
-WAYLAND_DISPLAY=wayland-0 "$CLIPGET" image/png >/dev/null 2>&1 # the -c one above
+clip image/png >/dev/null 2>&1 # the -c one above
 kill $(test_shots) 2>/dev/null
 wait_for "no screenShot left" test "$(shot_count)" = 0
 t0=$(ms)
@@ -241,16 +251,32 @@ t0=$(ms)
 WAYLAND_DISPLAY=wayland-0 "$SHOT" -c 2>>"$LOG"
 expect "-c with a toast: returns at once" "[ $(($(ms) - t0)) -lt 1500 ]"
 wait_for "-c: the toast shows" toast_shown
-WAYLAND_DISPLAY=wayland-0 "$CLIPGET" image/png >"$SMOKE_DIR/tclip.png" 2>>"$LOG"
+clip image/png >"$SMOKE_DIR/tclip.png" 2>>"$LOG"
 expect "-c: pasting works while the toast is up" "[ \"\$(build/pngtool pixel \"$SMOKE_DIR/tclip.png\" $TOAST_X $TOAST_Y)\" = 00ff00 ]"
 wait_for "-c: the toast goes" toast_gone
-WAYLAND_DISPLAY=wayland-0 "$CLIPGET" image/png >"$SMOKE_DIR/tclip2.png" 2>>"$LOG"
+clip image/png >"$SMOKE_DIR/tclip2.png" 2>>"$LOG"
 expect "-c: and pasting still works after it" "\"$PNGCMP\" same \"$SMOKE_DIR/tclip.png\" \"$SMOKE_DIR/tclip2.png\""
 expect "-c: one screenShot stays for the clipboard" "[ \"\$(shot_count)\" = 1 ]"
 
 stop_mwc
 no_shots() { [ "$(shot_count)" = 0 ]; }
 poll "the clipboard screenShot ends with the compositor" no_shots
+
+# A reader that asks and never reads, like a hung application, gets left behind; the
+# next paste still works. On noise, so the PNG is more than a pipe holds.
+"$PNGCMP" noise "$SMOKE_DIR/noise.png" 1280 720 || fail "cannot make the noise"
+MWC_WALLPAPER=$SMOKE_DIR/noise.png begin
+run_shot -c
+expect "-c on noise: status 0" "[ $STATUS = 0 ]"
+coproc STALL { WAYLAND_DISPLAY=wayland-0 exec timeout "$TIMEOUT" "$CLIPGET" -s image/png; }
+read -r -t "$TIMEOUT" asked <&"${STALL[0]}"
+expect "a paste that is never read" "[ \"\${asked:-}\" = asked ]"
+clip image/png >"$SMOKE_DIR/clip4.png" 2>>"$LOG" || fail "a stuck reader blocks the next paste"
+same_as_grim "... doesn't block the next one" "$SMOKE_DIR/clip4.png"
+expect "... a PNG larger than a pipe" "[ \$(stat -c %s \"$SMOKE_DIR/clip4.png\") -gt 1048576 ]"
+kill "$STALL_PID" 2>/dev/null
+wait "$STALL_PID" 2>/dev/null
+stop_mwc
 
 # ---- -r: a rectangle ---------------------------------------------------------------------
 
@@ -333,7 +359,7 @@ do_input move 250 160
 do_input up left
 region_end
 expect "-r -c: status 0" "[ $STATUS = 0 ]"
-WAYLAND_DISPLAY=wayland-0 "$CLIPGET" image/png >"$SMOKE_DIR/rclip.png" 2>>"$LOG"
+clip image/png >"$SMOKE_DIR/rclip.png" 2>>"$LOG"
 same_as_grim "-r -c: the rectangle in the clipboard" "$SMOKE_DIR/rclip.png" -g "50,60 200x100"
 stop_vinput
 stop_mwc
@@ -416,6 +442,13 @@ check "-r at scale 4: a 30x30 crosshair at buffer scale 3" \
 do_input key Escape
 region_end
 stop_vinput
+stop_mwc
+
+# wl_output only knows integer scales; -l must say the real one.
+printf 'Mwm*HEADLESS-1*outputScale: 1.5\n' >"$XDG_CONFIG_HOME/mwc/mwmrc"
+begin
+run_shot -l
+expect "-l at scale 1.5: the fractional scale" "[ \"\$OUT\" = 'HEADLESS-1 853x480+0+0 scale 1.5' ]"
 stop_mwc
 rm "$XDG_CONFIG_HOME/mwc/mwmrc"
 

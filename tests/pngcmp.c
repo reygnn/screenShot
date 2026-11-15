@@ -3,6 +3,7 @@
  *
  *   pngcmp gen OUT W H     a picture whose quarters differ, so a turned or mirrored
  *                          copy of it is never the same
+ *   pngcmp noise OUT W H   noise, a PNG that doesn't compress
  *   pngcmp same A B        exit 0 if both have the same size and pixels
  *   pngcmp size FILE       prints WxH
  *   pngcmp crop IN X Y W H OUT   that piece of IN, in its pixels
@@ -38,6 +39,24 @@ static int gen(const char *out, int w, int h)
 	cairo_rectangle(cr, w / 16, h / 4, w / 4, h / 16);
 	cairo_fill(cr);
 	cairo_destroy(cr);
+	int ret = cairo_surface_write_to_png(s, out) == CAIRO_STATUS_SUCCESS ? 0 : 1;
+	cairo_surface_destroy(s);
+	return ret;
+}
+
+/* Noise, so its PNG is larger than a pipe holds. */
+static int noise(const char *out, int w, int h)
+{
+	cairo_surface_t *s = cairo_image_surface_create(CAIRO_FORMAT_RGB24, w, h);
+	unsigned char *p = cairo_image_surface_get_data(s);
+	int stride = cairo_image_surface_get_stride(s);
+	uint32_t x = 1;
+	for (int j = 0; j < h; j++)
+		for (int i = 0; i < w; i++) {
+			x = x * 1664525u + 1013904223u;
+			((uint32_t *)(p + j * stride))[i] = x >> 8;
+		}
+	cairo_surface_mark_dirty(s);
 	int ret = cairo_surface_write_to_png(s, out) == CAIRO_STATUS_SUCCESS ? 0 : 1;
 	cairo_surface_destroy(s);
 	return ret;
@@ -95,6 +114,8 @@ int main(int argc, char *argv[])
 			argv[7]);
 	if (argc == 5 && strcmp(argv[1], "gen") == 0)
 		return gen(argv[2], atoi(argv[3]), atoi(argv[4]));
+	if (argc == 5 && strcmp(argv[1], "noise") == 0)
+		return noise(argv[2], atoi(argv[3]), atoi(argv[4]));
 	if (argc == 4 && strcmp(argv[1], "same") == 0)
 		return same(argv[2], argv[3]);
 	if (argc == 3 && strcmp(argv[1], "size") == 0) {
@@ -103,6 +124,7 @@ int main(int argc, char *argv[])
 			cairo_image_surface_get_height(s));
 		return 0;
 	}
-	fprintf(stderr, "usage: pngcmp gen OUT W H | same A B | size FILE | crop IN X Y W H OUT\n");
+	fprintf(stderr, "usage: pngcmp gen|noise OUT W H | same A B | size FILE"
+		" | crop IN X Y W H OUT\n");
 	return 2;
 }

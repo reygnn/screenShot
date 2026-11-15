@@ -58,6 +58,7 @@ struct output {
 	char name[64];
 	/* From wl_output, for a compositor without xdg-output. */
 	int32_t geo_x, geo_y, transform, scale;
+	int32_t mode_w, mode_h; /* the current mode, in buffer pixels, for -l */
 	/* Logical, in the layout: from xdg-output if there is one. */
 	int32_t x, y, w, h;
 	bool have_logical;
@@ -130,6 +131,11 @@ static void wl_output_geometry(void *data, struct wl_output *wl, int32_t x, int3
 static void wl_output_mode(void *data, struct wl_output *wl, uint32_t flags,
 	int32_t w, int32_t h, int32_t refresh)
 {
+	struct output *o = data;
+	if (flags & WL_OUTPUT_MODE_CURRENT) {
+		o->mode_w = w;
+		o->mode_h = h;
+	}
 }
 
 static void wl_output_done(void *data, struct wl_output *wl)
@@ -1237,7 +1243,11 @@ static int temp_file(const char *dir, char *path, size_t size)
 	int fd = mkostemp(path, O_CLOEXEC);
 	if (fd < 0)
 		die("cannot write in %s: %s", dir, strerror(errno));
-	fchmod(fd, 0644);
+	/* mkostemp gives 0600; a plain file would get 0666 less the umask. fchmod
+	 * doesn't apply the umask itself, and umask 077 must keep a picture private. */
+	mode_t mask = umask(0);
+	umask(mask);
+	fchmod(fd, 0666 & ~mask);
 	return fd;
 }
 
@@ -1604,15 +1614,38 @@ static void show_toast(cairo_surface_t *picture, const char *title, const char *
 static struct mem clip;
 static bool clip_cancelled;
 
+/* A reader that stops reading would block us for good, and with us every later paste
+ * and the end of the toast. A slow one is fine as long as it makes progress. */
+#define PASTE_STALL_MS 5000
+
+static void paste_to(int fd)
+{
+	int flags = fcntl(fd, F_GETFL);
+	if (flags >= 0)
+		fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+	const unsigned char *data = clip.data;
+	size_t len = clip.len;
+	while (len > 0) {
+		ssize_t n = write(fd, data, len);
+		if (n > 0) {
+			data += n;
+			len -= n;
+		} else if (n < 0 && errno == EAGAIN) {
+			struct pollfd p = { .fd = fd, .events = POLLOUT };
+			int r = poll(&p, 1, PASTE_STALL_MS);
+			if (r == 0 || (r < 0 && errno != EINTR))
+				return;
+		} else if (n < 0 && errno != EINTR) {
+			return;
+		}
+	}
+}
+
 static void source_send(void *data, struct ext_data_control_source_v1 *source,
 	const char *mime, int32_t fd)
 {
-	/* The reader may be slow: wait for it, it is our only job now. */
-	int flags = fcntl(fd, F_GETFL);
-	if (flags >= 0)
-		fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
 	if (strcmp(mime, "image/png") == 0)
-		write_all(fd, clip.data, clip.len);
+		paste_to(fd);
 	close(fd);
 }
 
@@ -1702,8 +1735,11 @@ static void list_outputs(void)
 		const struct output *o = &outputs[i];
 		int x, y, w, h;
 		logical_box(o, &x, &y, &w, &h);
+		/* The real scale, also a fractional one; wl_output's is rounded up. */
+		int mw = o->transform & 1 ? o->mode_h : o->mode_w;
+		double scale = mw > 0 && w > 0 ? (double)mw / w : o->scale > 0 ? o->scale : 1;
 		printf("%s %dx%d%+d%+d scale %g\n", o->name, w, h, x, y,
-			o->scale > 0 ? (double)o->scale : 1.0);
+			round(scale * 100) / 100);
 	}
 }
 
@@ -1727,7 +1763,9 @@ int main(int argc, char *argv[])
 		case 'd': {
 			char *end;
 			delay = strtod(optarg, &end);
-			if (*end || delay < 0 || delay > 3600) {
+			/* !(0 <= d <= 3600) also catches nan; end == optarg an empty one. */
+			if (end == optarg || *end || !(delay >= 0 && delay <= 3600) ||
+				strpbrk(optarg, "xX")) {
 				fprintf(stderr, "screenShot: -d wants seconds, not %s\n", optarg);
 				return 2;
 			}
