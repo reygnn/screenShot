@@ -1,7 +1,7 @@
 /*
  * screenShot - takes a screenshot of the screen or a rectangle, into a file or the
- * clipboard. No window of its own. For mwc (https://github.com/reygnn/mwc) and any other Wayland compositor with the
- * same protocols.
+ * clipboard. No window of its own. For mwc (https://github.com/reygnn/mwc) and any
+ * other Wayland compositor with the same protocols.
  *
  *   screenShot          Screenshots/Screenshot_<date>_<time>.png in the pictures
  *                       folder, the path goes to stdout
@@ -981,6 +981,16 @@ static void load_cursor(void)
 	if (!c || c->image_count == 0)
 		return;
 	sel.cursor = c->images[0];
+	/* A theme has only some sizes: Adwaita gives 64x64 for 72. A buffer scale that
+	 * doesn't divide the size is a protocol error, so take the largest one up to the
+	 * wanted scale that does; the compositor scales the rest. */
+	int want = sel.cursor_scale;
+	sel.cursor_scale = 1;
+	for (int d = want; d > 1; d--)
+		if (sel.cursor->width % d == 0 && sel.cursor->height % d == 0) {
+			sel.cursor_scale = d;
+			break;
+		}
 	sel.cursor_surface = wl_compositor_create_surface(compositor);
 	wl_surface_set_buffer_scale(sel.cursor_surface, sel.cursor_scale);
 	wl_surface_attach(sel.cursor_surface, wl_cursor_image_get_buffer(sel.cursor), 0, 0);
