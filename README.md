@@ -1,11 +1,12 @@
-# screenShot – a screenshot into a file or the clipboard (for mwc)
+# screenShot
 
-One C file, libwayland and cairo only, no window of its own. Captures the whole screen,
-across all monitors or just one of them, or a rectangle drawn with the mouse:
+screenShot takes a screenshot into a file or the clipboard: the whole screen across
+all monitors, one monitor, or a rectangle drawn with the mouse. It is made for
+[mwc](https://github.com/reygnn/mwc) and runs on any Wayland compositor with
+`wlr-screencopy` (version 3), `ext-data-control-v1` for the clipboard and
+`wlr-layer-shell` for `-r`. One C file on libwayland and Cairo, no window of its own.
 
-    screenShot              into Screenshots/ in the pictures folder, e.g.
-                            ~/Pictures/Screenshots/Screenshot_2026-11-08_14-03-22.png,
-                            the path goes to stdout
+    screenShot              into Screenshots/ in the pictures folder, the path to stdout
     screenShot -c           into the clipboard, as image/png
     screenShot -f FILE      into that file, - for stdout
     screenShot -r           a rectangle, dragged with the mouse
@@ -15,91 +16,86 @@ across all monitors or just one of them, or a rectangle drawn with the mouse:
     screenShot -q           no toast afterwards
     screenShot -v           print the version
 
+Exit status 0 on success, 1 on an error (message on stderr), 2 for bad options.
+
+
 ## Build
+
+On Ubuntu 26.04:
 
     sudo apt install build-essential pkg-config libwayland-dev wayland-protocols \
         libcairo2-dev
     make
-    sudo make install        # -> /usr/local/bin/screenShot
+    sudo make install
 
-## In mwc
+`make install` puts `screenShot` in `/usr/local/bin`.
 
-**Print** runs `screenShot`, **Shift+Print** `screenShot -c`. Other commands go in
-`~/.config/mwc/mwmrc`:
 
-    Mwm*screenshot:            screenShot
-    Mwm*clipboardScreenshot:   screenShot -c
+## Run
 
-With a delay, for example to leave time to open a menu: `screenShot -d 3`. For a
-rectangle on Print instead of the whole screen:
+In mwc, Print runs `screenShot` and Shift+Print `screenShot -c`. Other commands go in
+`~/.config/mwc/mwmrc`, for example a rectangle on Print:
 
     Mwm*screenshot:            screenShot -r
+    Mwm*clipboardScreenshot:   screenShot -c
 
-screenShot needs `wlr-screencopy` (version 3), `ext-data-control-v1` for the clipboard
-and `wlr-layer-shell` for `-r`. mwc has all three, and so do most other wlroots
-compositors.
+The pictures folder is `XDG_PICTURES_DIR` from `~/.config/user-dirs.dirs`, else
+`~/Pictures`; `Screenshots` in it is created when needed. Files are named
+`Screenshot_2026-11-08_14-03-22.png`, a second one within the same second `..._2.png`.
+Nothing there is overwritten; `-f` replaces the file it is given. A file only shows up
+complete.
 
-## Behavior
+Several monitors end up in one picture, laid out as they are. Rotated and flipped
+monitors come out the right way up.
 
-- **Pictures folder:** `XDG_PICTURES_DIR` from `~/.config/user-dirs.dirs`, as
-  `xdg-user-dir PICTURES` reports it, otherwise `~/Pictures`. `Screenshots` inside it is
-  created when needed.
-- **Nothing is overwritten:** a second screenshot within the same second is named
-  `…_2.png`. With `-f` the given file is replaced. A file only ever shows up complete,
-  never half written.
-- **Several monitors** end up in one picture, laid out as they are in the layout. Gaps
-  stay black. With different scales the picture gets the largest one, so no monitor
-  loses resolution. Rotated and flipped monitors come out the right way up.
-- **Rectangle (`-r`):** screenShot captures the screen first and shows that still,
-  dimmed, on every monitor. Drag a rectangle with the left button: within it the still
-  shows undimmed, with a white border around it. Letting go takes it. A click without a
-  drag takes the whole monitor under the pointer. Esc or another button gives up, with
-  exit status 1. Since the picture is a still, menus and tooltips stay as they were, and
-  the overlay is never in it. Edges go to the pixels the pointer is on, also on a scaled
-  monitor, and a rectangle may span several monitors. `-r` combines with `-c`, `-f`,
-  `-o`, `-d` and `-p`.
-- **Toast:** once the screenshot is written or copied, a small box at the top in the
-  middle, a little below the edge, shows a thumbnail and the file name, or "in the
-  clipboard", for three seconds. Clicks and keys go through it. It runs in the
-  background, so the command returns at once and `$(screenShot)` gets its path without
-  waiting. A screenshot taken while a toast is up has that toast in it. `-q` leaves the
-  toast out, and so does `-f -`, where the picture goes into a pipe.
-- **Clipboard:** on Wayland the clipboard holds no data, only a promise: whoever copied
-  hands the data over when someone pastes. So `screenShot -c` returns at once but leaves
-  a process in the background until something else is copied or the compositor exits.
-- **Without `WAYLAND_DISPLAY`**, for example from an ssh login, a console or a program
-  started outside the session, screenShot looks in `$XDG_RUNTIME_DIR` (otherwise
-  `/run/user/<uid>`) for the first `wayland-N` socket whose compositor offers
-  screencopy.
-- **Exit status:** 0 on success, 1 on an error (message on stderr), 2 for bad options.
+With `-r` screenShot shows the screen as a dimmed still on every monitor. Drag a
+rectangle with the left button; letting go takes it. A click without a drag takes the
+monitor under the pointer, Esc or another button gives up with status 1. The rectangle
+may span monitors and its edges are on the pixels the pointer is on, also on a scaled
+monitor. `-r` combines with `-c`, `-f`, `-o`, `-d` and `-p`.
+
+Afterwards a toast at the top of the screen shows a thumbnail and the file name, or
+"in the clipboard", for three seconds. It lets clicks and keys through and runs in the
+background, so `$(screenShot)` gets the path at once. `-q` and `-f -` leave it out.
+
+Without `WAYLAND_DISPLAY`, from an ssh login or a program started outside the session,
+screenShot takes the first `wayland-N` socket in `$XDG_RUNTIME_DIR` (else
+`/run/user/<uid>`) whose compositor offers screencopy.
+
 
 ## For Claude sessions
 
-A Claude Code session on this machine, including one over Remote Control from a phone,
-can run screenShot directly and then look at the picture:
+A Claude Code session on this machine, also one over Remote Control, can take a
+screenshot and read the PNG:
 
-    screenShot -f /tmp/screen.png        # prints the path, then open the PNG with Read
-    screenShot -o DP-1 -f /tmp/dp1.png   # only one monitor; -l lists the names
+    screenShot -f /tmp/screen.png        # prints the path
+    screenShot -o DP-1 -f /tmp/dp1.png   # one monitor
     screenShot -d 2 -f /tmp/screen.png   # let something open first
 
-`-r` waits for a person with a mouse, so a session uses it only when someone is at the
-screen to drag the rectangle. The session's shell doesn't have to be started inside
-mwc: without `WAYLAND_DISPLAY`, screenShot finds the compositor by itself (see above).
-The session then sees exactly what is on the screen, including open mail or a password
-manager. The toast shows the person at the screen each time a session takes a
-screenshot; `-q` would hide that.
+The session's shell needn't run inside mwc, see above. `-r` waits for a person at the
+mouse. What the session sees is in CAVEATS.
 
-## Tests
+
+## How this is built
+
+screenShot is developed with Claude (Anthropic) as a coding assistant. I set the
+scope and review the changes; Claude writes most of the code and the tests, see
+Testing. Known limits are written down in CAVEATS.
+
+
+## Testing
 
     make test
 
-runs screenShot under a headless mwc. Every picture is compared pixel for pixel with
-grim's: one monitor, all eight rotations and flips, scale 2, two monitors side by side,
-plus the clipboard, the toast, the pictures folder and starting without
-`WAYLAND_DISPLAY`. `-r` is driven with mwc's simulated mouse and keyboard. It needs a
-built mwc in `MWC_DIR` (otherwise `../mwc`) with `build/vinput` and `build/pngtool`, and
-`grim`. mwc's `distrobox.ini` has everything for it. The tests only count and stop their
-own screenShot processes, never one of the running session.
+runs `tests/build.sh`, which checks the Makefile, then screenShot in a headless mwc
+and compares every picture pixel for pixel with grim's: one monitor, all eight
+rotations and flips, scales 2 and 4, two monitors, the clipboard, the toast, the
+pictures folder, starting without `WAYLAND_DISPLAY`, and `-r` with mwc's simulated
+mouse and keyboard. It needs a built mwc in `MWC_DIR` (by default `../mwc`) with
+`build/vinput` and `build/pngtool`, and grim. mwc's development box has all of it:
+
+    distrobox enter mwc-dev -- make test
+
 
 ## License
 
