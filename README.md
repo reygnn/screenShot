@@ -14,7 +14,7 @@ all monitors, one monitor, or a rectangle drawn with the mouse. It is made for
     screenShot -d SECONDS   wait that long first
     screenShot -p           with the mouse pointer
     screenShot -q           no toast afterwards
-    screenShot -v           print the version
+    screenShot -v           print the version and the commit built
 
 Exit status 0 on success, 1 on an error (message on stderr), 2 for bad options.
 
@@ -91,11 +91,13 @@ tests, see Testing. Known limits are written down in CAVEATS.
 runs `tests/build.sh`, which checks the Makefile, then screenShot in a headless mwc
 and compares its pictures pixel for pixel with grim's: one monitor, all eight
 rotations and flips, scale 2, two monitors, the clipboard and `-r` with mwc's
-simulated mouse and keyboard. It also checks the toast, the pictures folder, file
-modes, starting without `WAYLAND_DISPLAY`, a paste that is never read, `-l` at scale
-1.5 and the `-r` crosshair at scale 4. It needs a built mwc in `MWC_DIR` (by default
-`../mwc`) with `build/vinput` and `build/pngtool`, and grim. mwc's development box has
-all of it:
+simulated mouse and keyboard. At scales 1.3 and 1.025, where grim loses a row, it
+compares with the frame itself, taken through ext-image-copy-capture. It also checks
+the toast, the pictures folder, one without hard links, file modes, starting without
+`WAYLAND_DISPLAY`, a paste that is never read, the edges of a monitor scaled up next to
+one at scale 2, `-l` at scale 1.5 and the `-r` crosshair at scale 4. It needs a built
+mwc in `MWC_DIR` (by default `../mwc`) with `build/vinput`, `build/pngtool` and
+`build/capturec`, and grim. mwc's development box has all of it:
 
     distrobox enter mwc-dev -- make test
 

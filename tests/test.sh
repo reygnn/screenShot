@@ -1,23 +1,26 @@
 #!/bin/bash
 # Black-box test of screenShot under a headless mwc. Every picture is checked against grim's of
-# the same screen, pixel for pixel. It has its own Wayland socket and runtime directory.
+# the same screen, pixel for pixel, or against the frame itself where grim is wrong. It has
+# its own Wayland socket and runtime directory.
 #
-# Needs a built mwc in MWC_DIR (by default ../mwc), grim, and from here build/clipget and
-# build/pngcmp. Output goes to build/test.log.
+# Needs a built mwc in MWC_DIR (by default ../mwc) with build/vinput, build/pngtool and
+# build/capturec, grim, and from here build/clipget, build/pngcmp and build/nolink.so.
+# Output goes to build/test.log.
 SHOT_DIR=$(cd "$(dirname "$0")/.." && pwd)
 SHOT=$SHOT_DIR/screenShot
 CLIPGET=$SHOT_DIR/build/clipget
 PNGCMP=$SHOT_DIR/build/pngcmp
+NOLINK=$SHOT_DIR/build/nolink.so
 LOG=$SHOT_DIR/build/test.log
 MWC_DIR=${MWC_DIR:-$SHOT_DIR/../mwc}
-for tool in "$SHOT" "$CLIPGET" "$PNGCMP"; do
-	[ -x "$tool" ] || { echo "FAIL: $tool not built"; exit 1; }
+for tool in "$SHOT" "$CLIPGET" "$PNGCMP" "$NOLINK"; do
+	[ -f "$tool" ] || { echo "FAIL: $tool not built"; exit 1; }
 done
 [ -d "$MWC_DIR" ] || { echo "FAIL: no mwc in $MWC_DIR (set MWC_DIR)"; exit 1; }
 cd "$MWC_DIR" || exit 1
 . tests/lib.sh
 require_tools grim
-for tool in build/vinput build/pngtool; do
+for tool in build/vinput build/pngtool build/capturec; do
 	[ -x "$tool" ] || { echo "FAIL: $MWC_DIR/$tool not built (make $tool)"; exit 1; }
 done
 # For the simulated mouse and keyboard.
@@ -88,7 +91,16 @@ poll() {
 
 # ---- the command line -----------------------------------------------------------------
 
-expect "-v prints the version" "[ \"\$(\"$SHOT\" -v)\" = \"screenShot \$(sed -n 's/.*SCREENSHOT_VERSION \"\\(.*\\)\"/\\1/p' \"$SHOT_DIR/version.h\")\" ]"
+# The version from version.h, then the commit the build is from where git knows it.
+version=$(sed -n 's/^#define SCREENSHOT_VERSION "\([^"]*\)".*/\1/p' "$SHOT_DIR/version.h")
+[ -n "$version" ] || fail "no SCREENSHOT_VERSION in version.h"
+fmt=--date=format-local:%Y%m%d.%H%M
+if commit=$(TZ=UTC0 git -C "$SHOT_DIR" log -1 --format=%cd.%h $fmt 2>/dev/null); then
+	git -C "$SHOT_DIR" diff --quiet HEAD || commit=$commit.dirty
+	version=$version+$commit
+fi
+got=$("$SHOT" -v)
+expect "-v prints screenShot $version" "[ \"\$got\" = \"screenShot $version\" ]"
 "$SHOT" -x >/dev/null 2>&1
 expect "an unknown option: status 2" "[ $? = 2 ]"
 "$SHOT" -c -f x.png >/dev/null 2>&1
@@ -164,6 +176,17 @@ echo "XDG_PICTURES_DIR=\"$SMOKE_DIR/abs pics\"" >>"$XDG_CONFIG_HOME/user-dirs.di
 run_shot
 expect "an absolute XDG_PICTURES_DIR, the last line wins, spaces are fine" \
 	"[[ \"\$OUT\" == \"$SMOKE_DIR/abs pics/Screenshots/\"*.png ]]"
+
+# A pictures folder on vfat or exFAT: no hard links there.
+echo "XDG_PICTURES_DIR=\"$SMOKE_DIR/fat\"" >"$XDG_CONFIG_HOME/user-dirs.dirs"
+for i in 1 2 3; do
+	LD_PRELOAD=$NOLINK run_shot
+	[ "$STATUS" = 0 ] || fail "without hard links: status $STATUS, $(cat "$SHOT_ERR")"
+done
+expect "without hard links: three in a row are three files" \
+	"[ \"\$(ls \"$SMOKE_DIR/fat/Screenshots\" | grep -c '^Screenshot_.*\\.png$')\" = 3 ]"
+expect "... and no temporary one left" "[ \"\$(ls -A \"$SMOKE_DIR/fat/Screenshots\" | wc -l)\" = 3 ]"
+same_as_grim "... the picture is the screen" "$OUT"
 rm "$XDG_CONFIG_HOME/user-dirs.dirs"
 
 # ---- without WAYLAND_DISPLAY -------------------------------------------------------------
@@ -196,6 +219,10 @@ test_shots() {
 	done
 }
 shot_count() { test_shots | wc -l; }
+# For wait_for, which runs its command again each time: "$(shot_count)" as an argument
+# would count only once.
+one_shot() { [ "$(shot_count)" = 1 ]; }
+no_shots() { [ "$(shot_count)" = 0 ]; }
 run_shot -c
 expect "-c: status 0, at once" "[ $STATUS = 0 ]"
 expect "-c: nothing on stdout" "[ -z \"\$OUT\" ]"
@@ -206,7 +233,7 @@ clip image/png >"$SMOKE_DIR/clip2.png" 2>>"$LOG"
 same_as_grim "it can be pasted again" "$SMOKE_DIR/clip2.png"
 expect "one screenShot stays behind for the clipboard" "[ \"\$(shot_count)\" = 1 ]"
 run_shot -c
-wait_for "a new copy ends the one before" test "$(shot_count)" = 1
+wait_for "a new copy ends the one before" one_shot
 clip image/png >"$SMOKE_DIR/clip3.png" 2>>"$LOG"
 same_as_grim "and the new one serves" "$SMOKE_DIR/clip3.png"
 
@@ -221,7 +248,7 @@ ms() { echo $(($(date +%s%N) / 1000000)); }
 
 clip image/png >/dev/null 2>&1 # the -c one above
 kill $(test_shots) 2>/dev/null
-wait_for "no screenShot left" test "$(shot_count)" = 0
+wait_for "no screenShot left" no_shots
 t0=$(ms)
 OUT=$(WAYLAND_DISPLAY=wayland-0 "$SHOT" -f "$SMOKE_DIR/toast.png" 2>>"$LOG")
 STATUS=$?
@@ -234,7 +261,7 @@ expect "the screenshot has no toast in it" "[ \"\$(build/pngtool pixel \"$SMOKE_
 wait_for "the toast goes" toast_gone
 t3=$(ms)
 expect "it was up about 3 seconds ($((t3 - t0)) ms)" "[ $((t3 - t0)) -ge 2500 ] && [ $((t3 - t0)) -le 5000 ]"
-wait_for "and its process ends" test "$(shot_count)" = 0
+wait_for "and its process ends" no_shots
 
 # The toast is its own process, forked before screenShot returns. None left behind
 # means none will come.
@@ -259,19 +286,20 @@ expect "-c: and pasting still works after it" "\"$PNGCMP\" same \"$SMOKE_DIR/tcl
 expect "-c: one screenShot stays for the clipboard" "[ \"\$(shot_count)\" = 1 ]"
 
 stop_mwc
-no_shots() { [ "$(shot_count)" = 0 ]; }
 poll "the clipboard screenShot ends with the compositor" no_shots
 
 # A reader that asks and never reads, like a hung application, gets left behind; the
-# next paste still works. On noise, so the PNG is more than a pipe holds.
+# next paste still works. On noise, so the PNG is more than a pipe holds. The stuck one
+# lives longer than clip's timeout, so only giving it up lets clip through.
 "$PNGCMP" noise "$SMOKE_DIR/noise.png" 1280 720 || fail "cannot make the noise"
 MWC_WALLPAPER=$SMOKE_DIR/noise.png begin
 run_shot -c
 expect "-c on noise: status 0" "[ $STATUS = 0 ]"
-coproc STALL { WAYLAND_DISPLAY=wayland-0 exec timeout "$TIMEOUT" "$CLIPGET" -s image/png; }
+coproc STALL { WAYLAND_DISPLAY=wayland-0 exec timeout $((3 * TIMEOUT)) "$CLIPGET" -s image/png; }
 read -r -t "$TIMEOUT" asked <&"${STALL[0]}"
 expect "a paste that is never read" "[ \"\${asked:-}\" = asked ]"
 clip image/png >"$SMOKE_DIR/clip4.png" 2>>"$LOG" || fail "a stuck reader blocks the next paste"
+expect "... which is still stuck" "kill -0 \"\$STALL_PID\" 2>/dev/null"
 same_as_grim "... doesn't block the next one" "$SMOKE_DIR/clip4.png"
 expect "... a PNG larger than a pipe" "[ \$(stat -c %s \"$SMOKE_DIR/clip4.png\") -gt 1048576 ]"
 kill "$STALL_PID" 2>/dev/null
@@ -279,6 +307,13 @@ wait "$STALL_PID" 2>/dev/null
 stop_mwc
 
 # ---- -r: a rectangle ---------------------------------------------------------------------
+
+# start_mouse [width height]: vinput, and back only once mwc has its pointer. -r on a seat
+# without one gives up at once.
+start_mouse() {
+	start_vinput "$@"
+	do_input move 0 0
+}
 
 # region_start [args...]: screenShot -r in the background, until its still is up. The red
 # quarter at 600,50 is dimmed then.
@@ -305,7 +340,7 @@ region_end() {
 }
 
 begin
-start_vinput
+start_mouse
 region_start -f "$SMOKE_DIR/r.png"
 do_input move 100 100
 do_input down left
@@ -410,7 +445,7 @@ expect "scale 2: every pixel of the monitor" "[ \"\$(\"$PNGCMP\" size \"$SMOKE_D
 same_as_grim "scale 2: the same as grim" "$SMOKE_DIR/s.png"
 run_shot -l
 expect "-l at scale 2: logical size" "[ \"\$OUT\" = 'HEADLESS-1 640x360+0+0 scale 2' ]"
-start_vinput 640 360
+start_mouse 640 360
 DIM_X=600 DIM_Y=50 region_start -f "$SMOKE_DIR/rs.png"
 do_input move 100 100
 do_input down left
@@ -433,7 +468,7 @@ stop_mwc
 # mwc's state. 3 is the largest that divides 30.
 printf 'Mwm*HEADLESS-1*outputScale: 4\n' >"$XDG_CONFIG_HOME/mwc/mwmrc"
 begin
-start_vinput 320 180
+start_mouse 320 180
 XCURSOR_THEME=Adwaita XCURSOR_SIZE=8 region_start -f "$SMOKE_DIR/rc.png"
 do_input move 100 100
 do_input move 120 110
@@ -450,6 +485,32 @@ begin
 run_shot -l
 expect "-l at scale 1.5: the fractional scale" "[ \"\$OUT\" = 'HEADLESS-1 853x480+0+0 scale 1.5' ]"
 stop_mwc
+
+# The compositor cuts the logical width and height off separately: at 1.3 the monitor
+# is 984x553, and 553 times 1280/984 is short of 720. grim loses that row, so here
+# the reference is the frame itself, through ext-image-copy-capture. At 1.025 it is
+# 1248x702, and 702 * (720 / 702.0) is just below 720: a click must still get that row.
+capturec() { WAYLAND_DISPLAY=wayland-0 "$MWC_DIR/build/capturec" "$@"; }
+for s in 1.3 1.025; do
+	printf 'Mwm*HEADLESS-1*outputScale: %s\n' "$s" >"$XDG_CONFIG_HOME/mwc/mwmrc"
+	begin
+	capturec frame HEADLESS-1 "$SMOKE_DIR/frame.png" 2>>"$LOG" ||
+		fail "scale $s: capturec failed"
+	run_shot -f "$SMOKE_DIR/f.png"
+	expect "scale $s: every row and column of the monitor" \
+		"\"$PNGCMP\" same \"$SMOKE_DIR/frame.png\" \"$SMOKE_DIR/f.png\""
+	run_shot -l
+	logical=$(echo "$OUT" | cut -d' ' -f2 | cut -d+ -f1)
+	start_mouse "${logical%x*}" "${logical#*x}"
+	region_start -f "$SMOKE_DIR/fc.png"
+	do_input move 300 300
+	do_input click left
+	region_end
+	expect "scale $s: a click takes every row and column too" \
+		"\"$PNGCMP\" same \"$SMOKE_DIR/frame.png\" \"$SMOKE_DIR/fc.png\""
+	stop_vinput
+	stop_mwc
+done
 rm "$XDG_CONFIG_HOME/mwc/mwmrc"
 
 export WLR_HEADLESS_OUTPUTS=2
@@ -463,7 +524,7 @@ run_shot -l
 second=$(echo "$OUT" | sed -n 2p | cut -d' ' -f1)
 run_shot -o "$second" -f "$SMOKE_DIR/second.png"
 same_as_grim "-o $second: only that one" "$SMOKE_DIR/second.png" -o "$second"
-start_vinput 2560 720
+start_mouse 2560 720
 region_start -f "$SMOKE_DIR/rtwo.png"
 do_input move 1200 100
 do_input down left
@@ -474,6 +535,27 @@ expect "-r across two monitors: status 0" "[ $STATUS = 0 ]"
 same_as_grim "-r across two monitors: the same as grim's" "$SMOKE_DIR/rtwo.png" -g "1200,100 200x200"
 stop_vinput
 stop_mwc
+
+# One at scale 2, one at 1: the picture gets 2, the other is scaled up. Its edges keep
+# their colour and don't fade into the black around it; the wallpaper's corners are red,
+# green, blue and white.
+printf 'Mwm*HEADLESS-1*outputScale: 2\n' >"$XDG_CONFIG_HOME/mwc/mwmrc"
+begin
+run_shot -l
+one=$(echo "$OUT" | grep ' scale 1$') || fail "no monitor at scale 1: $OUT"
+ox=$(echo "$OUT" | sed 's/.*x[0-9]*+\([0-9]*\)+.*/\1/' | sort -n | head -1)
+oy=$(echo "$OUT" | sed 's/.*+\([0-9]*\) scale.*/\1/' | sort -n | head -1)
+read -r w h x y <<<"$(echo "$one" | sed 's/^[^ ]* \([0-9]*\)x\([0-9]*\)+\([0-9]*\)+\([0-9]*\).*/\1 \2 \3 \4/')"
+run_shot -f "$SMOKE_DIR/mixed.png"
+expect "two scales: status 0" "[ $STATUS = 0 ]"
+l=$(((x - ox) * 2)) t=$(((y - oy) * 2)) r=$(((x - ox + w) * 2 - 1)) b=$(((y - oy + h) * 2 - 1))
+for corner in "$l $t ff0000" "$r $t 00ff00" "$l $b 0000ff" "$r $b ffffff"; do
+	set -- $corner
+	got=$(build/pngtool pixel "$SMOKE_DIR/mixed.png" "$1" "$2")
+	expect "two scales: the scaled up corner at $1,$2 is $3 ($got)" "[ \"$got\" = $3 ]"
+done
+stop_mwc
+rm "$XDG_CONFIG_HOME/mwc/mwmrc"
 unset WLR_HEADLESS_OUTPUTS
 
 echo "PASS: screenShot"

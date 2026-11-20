@@ -573,13 +573,24 @@ static void logical_box(const struct output *o, int *x, int *y, int *w, int *h)
 	}
 }
 
-/* Its buffer pixels per logical pixel. */
-static double output_scale(const struct output *o)
+/*
+ * Its buffer pixels per logical pixel, one for each axis: the compositor cuts the
+ * logical width and height off separately, so 1280x720 at 1.3 is 984x553, and 553 *
+ * 1280 / 984 is not 720.
+ */
+static void output_scale(const struct output *o, double *sx, double *sy)
 {
 	int x, y, w, h, tw, th;
 	logical_box(o, &x, &y, &w, &h);
 	transformed_size(o, &tw, &th);
-	return w > 0 ? (double)tw / w : 1;
+	*sx = w > 0 ? (double)tw / w : 1;
+	*sy = h > 0 ? (double)th / h : 1;
+}
+
+/* The pixel a point in buffer pixels is on. 702 * (720 / 702.0) lands just below 720. */
+static int pixel_at(double v)
+{
+	return (int)floor(v + 1e-6);
 }
 
 /* Once per capture: compose() may take an output more than once. */
@@ -600,13 +611,13 @@ static void swap_red_blue(struct output *o)
  * All the captured outputs in one picture, as they lie in the layout. A picture of
  * monitors with different scales gets the largest one, so none loses detail. What no
  * monitor covers stays black. Where it begins in the layout and its pixels per logical
- * pixel go to *origin_x, *origin_y and *scale_out.
+ * pixel go to *origin_x, *origin_y, *scale_x and *scale_y.
  */
 static cairo_surface_t *compose(struct output **list, int n, int *origin_x, int *origin_y,
-	double *scale_out)
+	double *scale_x, double *scale_y)
 {
 	int x0 = INT_MAX, y0 = INT_MAX, x1 = INT_MIN, y1 = INT_MIN;
-	double scale = 0;
+	double scx = 0, scy = 0;
 	for (int i = 0; i < n; i++) {
 		int x, y, w, h;
 		logical_box(list[i], &x, &y, &w, &h);
@@ -614,12 +625,13 @@ static cairo_surface_t *compose(struct output **list, int n, int *origin_x, int 
 		if (y < y0) y0 = y;
 		if (x + w > x1) x1 = x + w;
 		if (y + h > y1) y1 = y + h;
-		double s = output_scale(list[i]);
-		if (s > scale)
-			scale = s;
+		double sx, sy;
+		output_scale(list[i], &sx, &sy);
+		scx = fmax(scx, sx);
+		scy = fmax(scy, sy);
 	}
-	int width = (int)((x1 - x0) * scale + 0.5);
-	int height = (int)((y1 - y0) * scale + 0.5);
+	int width = (int)((x1 - x0) * scx + 0.5);
+	int height = (int)((y1 - y0) * scy + 0.5);
 	cairo_surface_t *out = cairo_image_surface_create(CAIRO_FORMAT_RGB24, width, height);
 	if (cairo_surface_status(out) != CAIRO_STATUS_SUCCESS)
 		die("cannot make a %dx%d picture", width, height);
@@ -635,16 +647,22 @@ static cairo_surface_t *compose(struct output **list, int n, int *origin_x, int 
 		int x, y, w, h, tw, th;
 		logical_box(o, &x, &y, &w, &h);
 		transformed_size(o, &tw, &th);
-		double s = scale / output_scale(o);
+		double sx, sy;
+		output_scale(o, &sx, &sy);
+		sx = scx / sx;
+		sy = scy / sy;
 
 		cairo_save(cr);
-		cairo_translate(cr, (x - x0) * scale, (y - y0) * scale);
-		cairo_scale(cr, s, s);
+		cairo_translate(cr, (x - x0) * scx, (y - y0) * scy);
+		cairo_scale(cr, sx, sy);
 		cairo_pattern_t *p = cairo_pattern_create_for_surface(src);
 		cairo_matrix_t m;
 		buffer_matrix(o, &m);
 		cairo_pattern_set_matrix(p, &m);
-		cairo_pattern_set_filter(p, s == 1 ? CAIRO_FILTER_NEAREST : CAIRO_FILTER_GOOD);
+		bool exact = sx == 1 && sy == 1;
+		cairo_pattern_set_filter(p, exact ? CAIRO_FILTER_NEAREST : CAIRO_FILTER_GOOD);
+		/* Scaled up, the edge pixels would blend with what lies outside: black. */
+		cairo_pattern_set_extend(p, CAIRO_EXTEND_PAD);
 		cairo_set_source(cr, p);
 		cairo_rectangle(cr, 0, 0, tw, th);
 		cairo_fill(cr);
@@ -656,7 +674,8 @@ static cairo_surface_t *compose(struct output **list, int n, int *origin_x, int 
 	cairo_surface_flush(out);
 	*origin_x = x0;
 	*origin_y = y0;
-	*scale_out = scale;
+	*scale_x = scx;
+	*scale_y = scy;
 	return out;
 }
 
@@ -679,7 +698,7 @@ struct shmbuf {
 struct overlay {
 	struct output *o;
 	cairo_surface_t *still;         /* the monitor as captured, in buffer pixels */
-	double scale;                   /* its pixels per logical pixel */
+	double sx, sy;                  /* its pixels per logical pixel */
 	struct wl_surface *surface;
 	struct zwlr_layer_surface_v1 *layer;
 	struct wp_viewport *viewport;
@@ -785,9 +804,9 @@ static void draw(struct overlay *ov)
 		double x, y, rw, rh;
 		drag_box(&x, &y, &rw, &rh);
 		/* On whole pixels, as cut() will: the ones the pointer is on. */
-		double x0 = floor((x - lx) * ov->scale), y0 = floor((y - ly) * ov->scale);
-		double x1 = floor((x + rw - lx) * ov->scale);
-		double y1 = floor((y + rh - ly) * ov->scale);
+		double x0 = pixel_at((x - lx) * ov->sx), y0 = pixel_at((y - ly) * ov->sy);
+		double x1 = pixel_at((x + rw - lx) * ov->sx);
+		double y1 = pixel_at((y + rh - ly) * ov->sy);
 		cairo_rectangle(cr, x0, y0, x1 - x0, y1 - y0);
 		cairo_save(cr);
 		cairo_clip(cr);
@@ -796,7 +815,7 @@ static void draw(struct overlay *ov)
 		cairo_paint(cr);
 		cairo_restore(cr);
 		/* The border lies outside, so the picture shows unchanged within. */
-		double lw_px = fmax(1, round(ov->scale));
+		double lw_px = fmax(1, round(ov->sx));
 		cairo_set_line_width(cr, lw_px);
 		cairo_rectangle(cr, x0 - lw_px / 2, y0 - lw_px / 2, x1 - x0 + lw_px,
 			y1 - y0 + lw_px);
@@ -972,7 +991,7 @@ static void load_cursor(void)
 {
 	double scale = 1;
 	for (int i = 0; i < sel.n; i++)
-		scale = fmax(scale, sel.ov[i].scale);
+		scale = fmax(scale, fmax(sel.ov[i].sx, sel.ov[i].sy));
 	sel.cursor_scale = (int)ceil(scale);
 	const char *size_env = getenv("XCURSOR_SIZE");
 	int size = size_env && atoi(size_env) > 0 ? atoi(size_env) : 24;
@@ -1021,12 +1040,12 @@ static bool select_rectangle(struct output **list, int n, double *x, double *y,
 		struct overlay *ov = &sel.ov[i];
 		int ox, oy;
 		ov->o = list[i];
-		ov->still = compose(&list[i], 1, &ox, &oy, &ov->scale);
+		ov->still = compose(&list[i], 1, &ox, &oy, &ov->sx, &ov->sy);
 		ov->surface = wl_compositor_create_surface(compositor);
 		if (viewporter)
 			ov->viewport = wp_viewporter_get_viewport(viewporter, ov->surface);
 		else
-			wl_surface_set_buffer_scale(ov->surface, (int)round(ov->scale));
+			wl_surface_set_buffer_scale(ov->surface, (int)round(ov->sx));
 		ov->layer = zwlr_layer_shell_v1_get_layer_surface(layer_shell, ov->surface,
 			ov->o->wl, ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY, "screenShot");
 		zwlr_layer_surface_v1_add_listener(ov->layer, &layer_listener, ov);
@@ -1097,13 +1116,13 @@ static bool select_rectangle(struct output **list, int n, double *x, double *y,
  * goes to the pixel the pointer is on: a pointer at 100.5 is on pixel 100.
  */
 static cairo_surface_t *cut(cairo_surface_t *picture, int origin_x, int origin_y,
-	double scale, double x, double y, double w, double h)
+	double sx, double sy, double x, double y, double w, double h)
 {
 	int pw = cairo_image_surface_get_width(picture);
 	int ph = cairo_image_surface_get_height(picture);
-	int x0 = (int)floor((x - origin_x) * scale), y0 = (int)floor((y - origin_y) * scale);
-	int x1 = (int)floor((x + w - origin_x) * scale);
-	int y1 = (int)floor((y + h - origin_y) * scale);
+	int x0 = pixel_at((x - origin_x) * sx), y0 = pixel_at((y - origin_y) * sy);
+	int x1 = pixel_at((x + w - origin_x) * sx);
+	int y1 = pixel_at((y + h - origin_y) * sy);
 	x0 = x0 < 0 ? 0 : x0 > pw ? pw : x0;
 	x1 = x1 < 0 ? 0 : x1 > pw ? pw : x1;
 	y0 = y0 < 0 ? 0 : y0 > ph ? ph : y0;
@@ -1268,6 +1287,26 @@ static void print_path(const char *path, char *saved, size_t size)
 	printf("%s\n", saved);
 }
 
+/*
+ * tmp under the name path, unless a file is there: 0, else an errno. link() never
+ * overwrites. vfat, exFAT and some network filesystems have no hard links; there
+ * renameat2 with RENAME_NOREPLACE does the same.
+ */
+static int put_new(const char *tmp, const char *path)
+{
+	if (link(tmp, path) == 0) {
+		unlink(tmp);
+		return 0;
+	}
+	int err = errno;
+	if (err != EPERM && err != EOPNOTSUPP && err != ENOSYS)
+		return err;
+	if (renameat2(AT_FDCWD, tmp, AT_FDCWD, path, RENAME_NOREPLACE) == 0)
+		return 0;
+	/* EINVAL: no RENAME_NOREPLACE either; the missing hard link is the news. */
+	return errno == EINVAL ? err : errno;
+}
+
 /* Into the pictures folder, under a name of its own: a second one in the same second
  * gets _2, and none overwrites another. */
 static void save_default(const struct mem *png, char *saved, size_t size)
@@ -1288,14 +1327,12 @@ static void save_default(const struct mem *png, char *saved, size_t size)
 			snprintf(path, sizeof(path), "%s/%s.png", dir, stamp);
 		else
 			snprintf(path, sizeof(path), "%s/%s_%d.png", dir, stamp, i);
-		/* link() fails where a file is there: nothing is overwritten. */
-		if (link(tmp, path) == 0) {
-			unlink(tmp);
+		int err = put_new(tmp, path);
+		if (err == 0) {
 			print_path(path, saved, size);
 			return;
 		}
-		if (errno != EEXIST) {
-			int err = errno;
+		if (err != EEXIST) {
 			unlink(tmp);
 			die("cannot write %s: %s", path, strerror(err));
 		}
@@ -1847,13 +1884,13 @@ int main(int argc, char *argv[])
 		swap_red_blue(chosen[i]);
 
 	int origin_x, origin_y;
-	double scale;
-	cairo_surface_t *picture = compose(chosen, n, &origin_x, &origin_y, &scale);
+	double sx, sy;
+	cairo_surface_t *picture = compose(chosen, n, &origin_x, &origin_y, &sx, &sy);
 	if (region) {
 		double x, y, w, h;
 		if (!select_rectangle(chosen, n, &x, &y, &w, &h))
 			die("given up, no screenshot");
-		cairo_surface_t *piece = cut(picture, origin_x, origin_y, scale, x, y, w, h);
+		cairo_surface_t *piece = cut(picture, origin_x, origin_y, sx, sy, x, y, w, h);
 		cairo_surface_destroy(picture);
 		picture = piece;
 	}

@@ -33,12 +33,23 @@ SHOT_LIBS = $(shell $(PKG_CONFIG) --libs $(PKGS)) -lm
 
 all: screenShot
 
-screenShot: screenShot.c version.h $(PROTO_H) $(PROTO_C)
+screenShot: screenShot.c version.h build/gitversion.h $(PROTO_H) $(PROTO_C)
 	$(CC) $(SHOT_CFLAGS) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ screenShot.c \
 		$(PROTO_C) $(SHOT_LIBS) $(LDLIBS)
 
 build:
 	mkdir -p build
+
+# The commit a build is from, after the version: +DATE.TIME.HASH, its commit time in
+# UTC, and .dirty for changes not committed. Rewritten only when it changes, so
+# screenShot is built again only then; empty without git.
+build/gitversion.h: FORCE | build
+	@v=$$(TZ=UTC0 git log -1 --format=%cd.%h --date=format-local:%Y%m%d.%H%M 2>/dev/null); \
+	if [ -n "$$v" ] && ! git diff --quiet HEAD 2>/dev/null; then v=$$v.dirty; fi; \
+	line="#define SCREENSHOT_GIT \"$${v:++$$v}\""; \
+	[ "$$(cat $@ 2>/dev/null)" = "$$line" ] || echo "$$line" >$@
+
+FORCE:
 
 build/ext-data-control-v1-client-protocol.h: $(DATA_CONTROL) | build
 	$(WAYLAND_SCANNER) client-header $< $@
@@ -71,6 +82,9 @@ build/clipget: tests/clipget.c build/ext-data-control-v1-client-protocol.h \
 build/pngcmp: tests/pngcmp.c | build
 	$(CC) $(SHOT_CFLAGS) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ tests/pngcmp.c \
 		$(SHOT_LIBS) $(LDLIBS)
+# A filesystem without hard links, through LD_PRELOAD.
+build/nolink.so: tests/nolink.c | build
+	$(CC) $(CPPFLAGS) $(CFLAGS) -fPIC -shared $(LDFLAGS) -o $@ tests/nolink.c
 
 install: screenShot
 	install -Dm755 screenShot $(DESTDIR)$(PREFIX)/bin/screenShot
@@ -83,7 +97,7 @@ build-test: | build
 	tests/build.sh
 
 # Needs a built mwc next to this directory, or in MWC_DIR, plus grim.
-test: build-test screenShot build/clipget build/pngcmp
+test: build-test screenShot build/clipget build/pngcmp build/nolink.so
 	tests/test.sh
 
 # C lines at most 100 columns, tabs as 8, as in mwc.
@@ -99,4 +113,4 @@ lint:
 clean:
 	rm -rf screenShot build
 
-.PHONY: all install uninstall build-test test lint clean
+.PHONY: all install uninstall build-test test lint clean FORCE
