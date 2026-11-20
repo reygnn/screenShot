@@ -1362,6 +1362,28 @@ static void save_file(const char *file, const struct mem *png, char *saved, size
 			die("cannot write to stdout: %s", strerror(errno));
 		return;
 	}
+	/*
+	 * A plain file gets its new content all at once, through a rename, and keeps its
+	 * mode: a private file stays private. Anything else is written into, as a shell's >
+	 * would: a link is followed and stays a link, a pipe stays a pipe.
+	 */
+	struct stat st;
+	bool there = lstat(file, &st) == 0;
+	if (there && !S_ISREG(st.st_mode)) {
+		int fd = open(file, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0666);
+		if (fd < 0 || !write_all(fd, png->data, png->len))
+			die("cannot write %s: %s", file, strerror(errno));
+		/* No path into a pipe, nor into the picture itself, as with -f /dev/stdout. */
+		struct stat out;
+		bool plain = fstat(fd, &st) == 0 && S_ISREG(st.st_mode) &&
+			!(fstat(STDOUT_FILENO, &out) == 0 && out.st_dev == st.st_dev &&
+				out.st_ino == st.st_ino);
+		if (close(fd) < 0)
+			die("cannot write %s: %s", file, strerror(errno));
+		if (plain)
+			print_path(file, saved, size);
+		return;
+	}
 	char dir[PATH_MAX];
 	snprintf(dir, sizeof(dir), "%s", file);
 	char *slash = strrchr(dir, '/');
@@ -1372,7 +1394,10 @@ static void save_file(const char *file, const struct mem *png, char *saved, size
 	else
 		*slash = '\0';
 	char tmp[PATH_MAX];
-	write_temp(temp_file(dir, tmp, sizeof(tmp)), tmp, png);
+	int fd = temp_file(dir, tmp, sizeof(tmp));
+	if (there)
+		fchmod(fd, st.st_mode & 0777);
+	write_temp(fd, tmp, png);
 	if (rename(tmp, file) < 0) {
 		int err = errno;
 		unlink(tmp);
@@ -1941,8 +1966,8 @@ int main(int argc, char *argv[])
 		to_clipboard(&png, picture);
 	} else if (file) {
 		save_file(file, &png, saved, sizeof(saved));
-		/* Into a pipe: someone else takes it from there. */
-		if (strcmp(file, "-") == 0)
+		/* Into a pipe, no file: someone else takes it from there. */
+		if (!saved[0])
 			quiet = true;
 	} else {
 		save_default(&png, saved, sizeof(saved));

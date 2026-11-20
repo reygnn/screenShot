@@ -56,6 +56,14 @@ still held by the compositor, shows only once the pointer moves; wlroots does ne
 A drag shorter than one logical pixel in both directions counts as a click.
 
 
+## -f
+
+A plain file is replaced through a rename, so it shows up complete. It keeps its mode,
+but not an owner or ACL other than screenShot's, and other hard links to it keep the
+old picture. Through a link, a pipe or a device the PNG is written in place, so a
+reader may see it half written.
+
+
 ## Errors
 
 A compositor that breaks the connection during startup is reported as one without

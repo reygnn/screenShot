@@ -134,9 +134,40 @@ expect "-f: no temporary file is left" "[ -z \"\$(ls -A \"$SMOKE_DIR\" | grep '^
 expect "-f with a relative path prints it absolute" "[ \"\$(cat \"$SMOKE_DIR/rel.out\")\" = \"$SMOKE_DIR/rel.png\" ]"
 (umask 022 && run_shot -f "$SMOKE_DIR/a.png" && [ "$STATUS" = 0 ])
 expect "-f overwrites a file it is told to" "[ $? = 0 ]"
-expect "-f: mode 644 under umask 022" "[ \$(stat -c %a \"$SMOKE_DIR/a.png\") = 644 ]"
+(umask 022 && run_shot -f "$SMOKE_DIR/new.png")
+expect "-f: mode 644 under umask 022" "[ \$(stat -c %a \"$SMOKE_DIR/new.png\") = 644 ]"
 (umask 077 && run_shot -f "$SMOKE_DIR/private.png")
 expect "-f: mode 600 under umask 077" "[ \$(stat -c %a \"$SMOKE_DIR/private.png\") = 600 ]"
+# What is there already keeps what it is: a private file stays private, a link stays a
+# link and the picture goes where it points, a pipe gets the picture.
+: >"$SMOKE_DIR/kept.png"
+chmod 600 "$SMOKE_DIR/kept.png"
+(umask 022 && run_shot -f "$SMOKE_DIR/kept.png")
+expect "-f on a file of mode 600 keeps it 600" "[ \$(stat -c %a \"$SMOKE_DIR/kept.png\") = 600 ]"
+expect "... and puts the picture in" "\"$PNGCMP\" same \"$SMOKE_DIR/kept.png\" \"$WALL\""
+mkdir "$SMOKE_DIR/real"
+: >"$SMOKE_DIR/real/x.png"
+ln -s real/x.png "$SMOKE_DIR/link.png"
+run_shot -f "$SMOKE_DIR/link.png"
+expect "-f on a link: still a link" "[ -L \"$SMOKE_DIR/link.png\" ]"
+expect "... the picture where it points" "\"$PNGCMP\" same \"$SMOKE_DIR/real/x.png\" \"$WALL\""
+expect "... and that is the path printed" "[ \"\$OUT\" = \"$SMOKE_DIR/real/x.png\" ]"
+expect "... no temporary file left there" "[ \"\$(ls -A \"$SMOKE_DIR/real\")\" = x.png ]"
+ln -s real/y.png "$SMOKE_DIR/nowhere.png"
+run_shot -f "$SMOKE_DIR/nowhere.png"
+expect "-f on a link to nowhere: still a link" "[ -L \"$SMOKE_DIR/nowhere.png\" ]"
+expect "... and the file it names is made" "\"$PNGCMP\" same \"$SMOKE_DIR/real/y.png\" \"$WALL\""
+mkfifo "$SMOKE_DIR/pipe"
+timeout "$TIMEOUT" cat "$SMOKE_DIR/pipe" >"$SMOKE_DIR/piped.png" &
+reader=$!
+run_shot -f "$SMOKE_DIR/pipe"
+wait "$reader"
+expect "-f on a named pipe: still a pipe" "[ -p \"$SMOKE_DIR/pipe\" ] && [ $STATUS = 0 ]"
+expect "... whose reader gets the picture" "\"$PNGCMP\" same \"$SMOKE_DIR/piped.png\" \"$WALL\""
+expect "... and no path on stdout" "[ -z \"\$OUT\" ]"
+WAYLAND_DISPLAY=wayland-0 "$SHOT" -f /dev/stdout >"$SMOKE_DIR/devout.png" 2>>"$LOG"
+expect "-f /dev/stdout: as -f -, the PNG and nothing else" \
+	"\"$PNGCMP\" same \"$SMOKE_DIR/devout.png\" \"$WALL\""
 WAYLAND_DISPLAY=wayland-0 "$SHOT" -f - >"$SMOKE_DIR/stdout.png" 2>>"$LOG"
 expect "-f - writes the PNG to stdout" "\"$PNGCMP\" same \"$SMOKE_DIR/stdout.png\" \"$WALL\""
 run_shot -f "$SMOKE_DIR/no/such/dir/a.png"
