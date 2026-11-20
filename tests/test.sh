@@ -4,17 +4,19 @@
 # its own Wayland socket and runtime directory.
 #
 # Needs a built mwc in MWC_DIR (by default ../mwc) with build/vinput, build/pngtool and
-# build/capturec, grim, and from here build/clipget, build/pngcmp, build/nolink.so and
-# build/otheruid.so. Output goes to build/test.log.
+# build/capturec, grim, and from here build/clipget, build/pngcmp and the LD_PRELOAD
+# fakes build/nolink.so, build/otheruid.so and build/swapopen.so. Output goes to
+# build/test.log.
 SHOT_DIR=$(cd "$(dirname "$0")/.." && pwd)
 SHOT=$SHOT_DIR/screenShot
 CLIPGET=$SHOT_DIR/build/clipget
 PNGCMP=$SHOT_DIR/build/pngcmp
 NOLINK=$SHOT_DIR/build/nolink.so
 OTHERUID=$SHOT_DIR/build/otheruid.so
+SWAPOPEN=$SHOT_DIR/build/swapopen.so
 LOG=$SHOT_DIR/build/test.log
 MWC_DIR=${MWC_DIR:-$SHOT_DIR/../mwc}
-for tool in "$SHOT" "$CLIPGET" "$PNGCMP" "$NOLINK" "$OTHERUID"; do
+for tool in "$SHOT" "$CLIPGET" "$PNGCMP" "$NOLINK" "$OTHERUID" "$SWAPOPEN"; do
 	[ -f "$tool" ] || { echo "FAIL: $tool not built"; exit 1; }
 done
 [ -d "$MWC_DIR" ] || { echo "FAIL: no mwc in $MWC_DIR (set MWC_DIR)"; exit 1; }
@@ -185,6 +187,45 @@ LD_PRELOAD=$OTHERUID WAYLAND_DISPLAY=wayland-0 timeout "$TIMEOUT" "$SHOT" -q \
 	-f "$SMOKE_DIR/theirs3.png" >/dev/null 2>>"$LOG"
 expect "... and one to their pipe is not: replaced, nothing goes to them" \
 	"[ $? = 0 ] && [ ! -L \"$SMOKE_DIR/theirs3.png\" ] && [ -p \"$SMOKE_DIR/their-pipe\" ]"
+# Their pipe right at the name, or their file of mode 666: replaced, as nothing there.
+mkfifo "$SMOKE_DIR/theirs4.png"
+LD_PRELOAD=$OTHERUID WAYLAND_DISPLAY=wayland-0 timeout "$TIMEOUT" "$SHOT" -q \
+	-f "$SMOKE_DIR/theirs4.png" >/dev/null 2>>"$LOG"
+expect "-f on someone else's pipe: replaced by the picture" \
+	"[ $? = 0 ] && [ ! -p \"$SMOKE_DIR/theirs4.png\" ] && \"$PNGCMP\" same \"$SMOKE_DIR/theirs4.png\" \"$WALL\""
+: >"$SMOKE_DIR/theirs5.png"
+chmod 666 "$SMOKE_DIR/theirs5.png"
+(umask 077 && LD_PRELOAD=$OTHERUID run_shot -f "$SMOKE_DIR/theirs5.png")
+expect "-f on someone else's file of mode 666, under umask 077: 600" \
+	"[ \$(stat -c %a \"$SMOKE_DIR/theirs5.png\") = 600 ]"
+# One's own pipe, swapped for a link to another file just as it is opened: nothing is
+# written there.
+mkfifo "$SMOKE_DIR/mine.fifo"
+echo secret >"$SMOKE_DIR/victim"
+ln -s victim "$SMOKE_DIR/swap-link"
+SWAP_PATH=$SMOKE_DIR/mine.fifo SWAP_WITH=$SMOKE_DIR/swap-link LD_PRELOAD=$SWAPOPEN \
+	WAYLAND_DISPLAY=wayland-0 timeout "$TIMEOUT" "$SHOT" -q -f "$SMOKE_DIR/mine.fifo" \
+	>/dev/null 2>"$SHOT_ERR"
+expect "-f on a pipe swapped for a link while opened: status 1" "[ $? = 1 ]"
+expect "... and the file the link leads to is untouched" \
+	"[ \"\$(cat \"$SMOKE_DIR/victim\")\" = secret ]"
+# Or for another file, as a hard link to one of one's own can be: not written either.
+rm -f "$SMOKE_DIR/mine.fifo"
+mkfifo "$SMOKE_DIR/mine.fifo"
+echo secret >"$SMOKE_DIR/swap-file"
+SWAP_PATH=$SMOKE_DIR/mine.fifo SWAP_WITH=$SMOKE_DIR/swap-file LD_PRELOAD=$SWAPOPEN \
+	WAYLAND_DISPLAY=wayland-0 timeout "$TIMEOUT" "$SHOT" -q -f "$SMOKE_DIR/mine.fifo" \
+	>/dev/null 2>"$SHOT_ERR"
+expect "-f on a pipe swapped for a file while opened: status 1" "[ $? = 1 ]"
+expect "... and that file is untouched" "[ \"\$(cat \"$SMOKE_DIR/mine.fifo\")\" = secret ]"
+# Or for a link to a pipe nobody reads: not even opened, which would wait for good.
+rm -f "$SMOKE_DIR/mine.fifo"
+mkfifo "$SMOKE_DIR/mine.fifo" "$SMOKE_DIR/unread.fifo"
+ln -s unread.fifo "$SMOKE_DIR/swap-link2"
+SWAP_PATH=$SMOKE_DIR/mine.fifo SWAP_WITH=$SMOKE_DIR/swap-link2 LD_PRELOAD=$SWAPOPEN \
+	WAYLAND_DISPLAY=wayland-0 timeout 5 "$SHOT" -q -f "$SMOKE_DIR/mine.fifo" \
+	>/dev/null 2>"$SHOT_ERR"
+expect "-f on a pipe swapped for a link to another pipe: status 1, at once" "[ $? = 1 ]"
 mkfifo "$SMOKE_DIR/pipe"
 timeout "$TIMEOUT" cat "$SMOKE_DIR/pipe" >"$SMOKE_DIR/piped.png" &
 reader=$!
@@ -656,6 +697,37 @@ stop_mwc
 # Both at 1.3, but 1280x720 and 1920x1080: their logical sizes are cut off to whole
 # numbers, so the scales differ in the fourth place. Neither may be resampled for that:
 # each piece of the picture is its monitor's frame, pixel for pixel.
+# frames_in <label> <picture>: the frames of the layout in $SMOKE_DIR/layout, each where
+# compose() puts it: at its logical place times the largest scale, rounded down.
+frames_in() {
+	local label=$1 picture=$2 name box px py mw mh
+	while read -r name box _; do
+		capturec frame "$name" "$SMOKE_DIR/frame-$name.png" 2>>"$LOG" ||
+			fail "capturec $name"
+		echo "$name $box $("$PNGCMP" size "$SMOKE_DIR/frame-$name.png")"
+	done <"$SMOKE_DIR/layout" >"$SMOKE_DIR/boxes"
+	# name WxH+X+Y MWxMH -> name X Y MW MH, in the picture's pixels.
+	awk '{ split($2, a, /[x+]/); split($3, m, "x"); n[NR] = $1; x[NR] = a[3]
+		y[NR] = a[4]; mw[NR] = m[1]; mh[NR] = m[2]; sx = m[1] / a[1]
+		sy = m[2] / a[2]; if (sx > scx) scx = sx; if (sy > scy) scy = sy
+		if (NR == 1 || a[3] < ox) ox = a[3]; if (NR == 1 || a[4] < oy) oy = a[4] }
+		END { for (i = 1; i <= NR; i++) printf "%s %d %d %d %d\n", n[i],
+			int((x[i] - ox) * scx + 1e-6), int((y[i] - oy) * scy + 1e-6),
+			mw[i], mh[i] }' "$SMOKE_DIR/boxes" >"$SMOKE_DIR/pieces"
+	while read -r name px py mw mh; do
+		"$PNGCMP" crop "$picture" "$px" "$py" "$mw" "$mh" "$SMOKE_DIR/piece.png"
+		expect "$label: $name ($mw x $mh at $px,$py) is its frame" \
+			"\"$PNGCMP\" same \"$SMOKE_DIR/piece.png\" \"$SMOKE_DIR/frame-$name.png\""
+	done <"$SMOKE_DIR/pieces"
+}
+# own <name> <x> <y>: the pixel of the frame of that monitor the pointer moved to x y is
+# on, at the monitor's own scale, as its overlay shows it. vinput puts it in the middle
+# of the logical pixel.
+own() {
+	awk -v n="$1" -v px="$2.5" -v py="$3.5" '$1 == n { split($2, a, /[x+]/)
+		split($3, m, "x"); printf "%d %d\n", int((px - a[3]) * m[1] / a[1] + 1e-6),
+			int((py - a[4]) * m[2] / a[2] + 1e-6) }' "$SMOKE_DIR/boxes"
+}
 printf 'Mwm*HEADLESS-%s*outputScale: 1.3\n' 1 2 >"$XDG_CONFIG_HOME/mwc/mwmrc"
 printf 'Mwm*HEADLESS-2*outputMode: 1920x1080\n' >>"$XDG_CONFIG_HOME/mwc/mwmrc"
 begin
@@ -663,23 +735,48 @@ run_shot -l
 echo "$OUT" >"$SMOKE_DIR/layout"
 run_shot -f "$SMOKE_DIR/same13.png"
 expect "1.3 on two sizes: status 0" "[ $STATUS = 0 ]"
-while read -r name box _; do
-	capturec frame "$name" "$SMOKE_DIR/frame-$name.png" 2>>"$LOG" || fail "capturec $name"
-	echo "$name $box $("$PNGCMP" size "$SMOKE_DIR/frame-$name.png")"
-done <"$SMOKE_DIR/layout" >"$SMOKE_DIR/boxes"
-# name WxH+X+Y MWxMH: where each frame lies, as compose() places it.
-awk '{ split($2, a, /[x+]/); split($3, m, "x"); n[NR] = $1; x[NR] = a[3]; y[NR] = a[4]
-	mw[NR] = m[1]; mh[NR] = m[2]; sx = m[1] / a[1]; sy = m[2] / a[2]
-	if (sx > scx) scx = sx; if (sy > scy) scy = sy
-	if (NR == 1 || a[3] < ox) ox = a[3]; if (NR == 1 || a[4] < oy) oy = a[4] }
-	END { for (i = 1; i <= NR; i++) printf "%s %d %d %d %d\n", n[i],
-		int((x[i] - ox) * scx + 0.5), int((y[i] - oy) * scy + 0.5), mw[i], mh[i] }' \
-	"$SMOKE_DIR/boxes" >"$SMOKE_DIR/pieces"
-while read -r name px py mw mh; do
-	"$PNGCMP" crop "$SMOKE_DIR/same13.png" "$px" "$py" "$mw" "$mh" "$SMOKE_DIR/piece.png"
-	expect "1.3 on two sizes: $name ($mw x $mh at $px,$py) is its frame" \
-		"\"$PNGCMP\" same \"$SMOKE_DIR/piece.png\" \"$SMOKE_DIR/frame-$name.png\""
-done <"$SMOKE_DIR/pieces"
+frames_in "1.3 side by side" "$SMOKE_DIR/same13.png"
+# A drag on the large one with its top at 31, where vinput puts the pointer at 31.5: at
+# that monitor's own scale row 40, at the small one's 41. The piece is what the overlay
+# showed, from the large one's frame.
+read -r _ box _ < <(grep '^HEADLESS-2 ' "$SMOKE_DIR/boxes")
+bx=$(echo "$box" | cut -d+ -f2)
+start_mouse "$(awk '{ split($2, a, /[x+]/); if (a[1] + a[3] > w) w = a[1] + a[3] }
+	END { print w }' "$SMOKE_DIR/boxes")" 830
+region_start -f "$SMOKE_DIR/drag13.png"
+do_input move $((bx + 100)) 31
+do_input down left
+do_input move $((bx + 300)) 131
+do_input up left
+region_end
+read -r x0 y0 < <(own HEADLESS-2 $((bx + 100)) 31)
+read -r x1 y1 < <(own HEADLESS-2 $((bx + 300)) 131)
+"$PNGCMP" crop "$SMOKE_DIR/frame-HEADLESS-2.png" "$x0" "$y0" $((x1 - x0)) $((y1 - y0)) \
+	"$SMOKE_DIR/want13.png"
+expect "1.3 side by side: a drag gives the rows the overlay showed, from $x0,$y0" \
+	"[ $STATUS = 0 ] && \"$PNGCMP\" same \"$SMOKE_DIR/drag13.png\" \"$SMOKE_DIR/want13.png\""
+stop_vinput
+stop_mwc
+
+# The same two, the small one below: no black row between them, and a click on it is
+# its frame.
+printf 'Mwm*HEADLESS-2*outputPosition: 0,0\nMwm*HEADLESS-1*outputPosition: 0,830\n' \
+	>>"$XDG_CONFIG_HOME/mwc/mwmrc"
+begin
+run_shot -l
+echo "$OUT" >"$SMOKE_DIR/layout"
+run_shot -f "$SMOKE_DIR/stacked.png"
+expect "1.3 one below the other: 1920x1800, no row between them" \
+	"[ \"\$(\"$PNGCMP\" size \"$SMOKE_DIR/stacked.png\")\" = 1920x1800 ]"
+frames_in "1.3 one below the other" "$SMOKE_DIR/stacked.png"
+start_mouse 1476 1383
+region_start -f "$SMOKE_DIR/click13.png"
+do_input move 300 1000
+do_input click left
+region_end
+expect "1.3 one below the other: a click on the lower one is its frame" \
+	"[ $STATUS = 0 ] && \"$PNGCMP\" same \"$SMOKE_DIR/click13.png\" \"$SMOKE_DIR/frame-HEADLESS-1.png\""
+stop_vinput
 stop_mwc
 rm "$XDG_CONFIG_HOME/mwc/mwmrc"
 unset WLR_HEADLESS_OUTPUTS

@@ -6,7 +6,8 @@ LOG=build/build.log
 exec 3>&1 >"$LOG" 2>&1
 bad() { echo "FAIL: $1 (see $LOG)" >&3; exit 1; }
 
-for target in screenShot build/clipget build/pngcmp build/nolink.so build/otheruid.so; do
+for target in screenShot build/clipget build/pngcmp build/nolink.so build/otheruid.so \
+		build/swapopen.so; do
 	make -n -B CPPFLAGS=-DSHOT_BUILD_TEST "$target" | grep -v wayland-scanner |
 		grep -q -- -DSHOT_BUILD_TEST || bad "CPPFLAGS don't reach $target"
 done

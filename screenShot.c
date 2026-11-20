@@ -642,10 +642,12 @@ static void place(const struct output *o, int x0, int y0, double scx, double scy
 	*ry = scy / sy;
 	*px = (x - x0) * scx;
 	*py = (y - y0) * scy;
+	/* Down, not to the nearest: one below another then starts where that one ends,
+	 * at most overlapping a part of a row, never leaving a black one. */
 	if (fabs(*rx - 1) * tw < 1 && fabs(*ry - 1) * th < 1) {
 		*rx = *ry = 1;
-		*px = round(*px);
-		*py = round(*py);
+		*px = pixel_at(*px);
+		*py = pixel_at(*py);
 	}
 }
 
@@ -1150,17 +1152,45 @@ static bool select_rectangle(struct output **list, int n, double *x, double *y,
 }
 
 /*
+ * A point in the layout, in the picture's pixels: through the monitor it lies on, where
+ * compose() put that one and at its own scale, so they are the pixels the overlay showed
+ * there. A point that ends a rectangle takes a monitor's right and bottom edge as its own.
+ */
+static void to_picture(struct output **list, int n, int x0, int y0, double scx, double scy,
+	double x, double y, bool end, double *to_x, double *to_y)
+{
+	for (int i = 0; i < n; i++) {
+		int lx, ly, lw, lh;
+		logical_box(list[i], &lx, &ly, &lw, &lh);
+		bool in = end ? x > lx && x <= lx + lw && y > ly && y <= ly + lh :
+			x >= lx && x < lx + lw && y >= ly && y < ly + lh;
+		if (!in)
+			continue;
+		double px, py, rx, ry, sx, sy;
+		place(list[i], x0, y0, scx, scy, &px, &py, &rx, &ry);
+		output_scale(list[i], &sx, &sy);
+		*to_x = px + (x - lx) * sx * rx;
+		*to_y = py + (y - ly) * sy * ry;
+		return;
+	}
+	*to_x = (x - x0) * scx;
+	*to_y = (y - y0) * scy;
+}
+
+/*
  * The piece of the picture that the rectangle covers, in the layout's coordinates. An edge
  * goes to the pixel the pointer is on: a pointer at 100.5 is on pixel 100.
  */
-static cairo_surface_t *cut(cairo_surface_t *picture, int origin_x, int origin_y,
-	double sx, double sy, double x, double y, double w, double h)
+static cairo_surface_t *cut(cairo_surface_t *picture, struct output **list, int n,
+	int origin_x, int origin_y, double sx, double sy, double x, double y, double w,
+	double h)
 {
 	int pw = cairo_image_surface_get_width(picture);
 	int ph = cairo_image_surface_get_height(picture);
-	int x0 = pixel_at((x - origin_x) * sx), y0 = pixel_at((y - origin_y) * sy);
-	int x1 = pixel_at((x + w - origin_x) * sx);
-	int y1 = pixel_at((y + h - origin_y) * sy);
+	double ax, ay, bx, by;
+	to_picture(list, n, origin_x, origin_y, sx, sy, x, y, false, &ax, &ay);
+	to_picture(list, n, origin_x, origin_y, sx, sy, x + w, y + h, true, &bx, &by);
+	int x0 = pixel_at(ax), y0 = pixel_at(ay), x1 = pixel_at(bx), y1 = pixel_at(by);
 	x0 = x0 < 0 ? 0 : x0 > pw ? pw : x0;
 	x1 = x1 < 0 ? 0 : x1 > pw ? pw : x1;
 	y0 = y0 < 0 ? 0 : y0 > ph ? ph : y0;
@@ -1388,52 +1418,95 @@ static void save_default(const struct mem *png, char *saved, size_t size)
 	die("too many screenshots named %s in %s", stamp, dir);
 }
 
-/* One's own or root's link, or one to stdout itself, as /dev/stdout is. In a container
- * root's may show as nobody's, so stdout is told by what it is, not by who owns it. */
-static bool link_to_follow(const char *file, const struct stat *link)
+/* One's own or root's. In a container root's may show as nobody's; what matters there,
+ * /dev/stdout, is told apart by being stdout. */
+static bool mine(const struct stat *st)
 {
-	if (link->st_uid == geteuid() || link->st_uid == 0)
-		return true;
-	struct stat to, out;
-	return stat(file, &to) == 0 && fstat(STDOUT_FILENO, &out) == 0 &&
-		to.st_dev == out.st_dev && to.st_ino == out.st_ino;
+	return st->st_uid == geteuid() || st->st_uid == 0;
 }
 
+static bool is_stdout(const struct stat *st)
+{
+	struct stat out;
+	return fstat(STDOUT_FILENO, &out) == 0 && out.st_dev == st->st_dev &&
+		out.st_ino == st->st_ino;
+}
+
+/* Into one's own pipe or device, and only the very one lstat saw: no link followed,
+ * nothing made or cut off before that is sure. */
+static void write_into(const char *path, const struct stat *seen, const struct mem *png)
+{
+	int fd = open(path, O_WRONLY | O_NOFOLLOW | O_CLOEXEC);
+	if (fd < 0)
+		die("cannot write %s: %s", path, strerror(errno));
+	struct stat st;
+	if (fstat(fd, &st) < 0 || st.st_dev != seen->st_dev || st.st_ino != seen->st_ino)
+		die("cannot write %s: it was swapped for something else", path);
+	if (!write_all(fd, png->data, png->len) || close(fd) < 0)
+		die("cannot write %s: %s", path, strerror(errno));
+}
+
+/* Where one's own link to nothing points, so the picture can be made there: the
+ * folder resolved, the name as the link gives it. False if the folder is not there. */
+static bool dangling_target(const char *link, char *out, size_t size)
+{
+	char to[PATH_MAX], dir[PATH_MAX], real[PATH_MAX];
+	ssize_t n = readlink(link, to, sizeof(to) - 1);
+	if (n <= 0)
+		return false;
+	to[n] = '\0';
+	const char *slash = strrchr(link, '/');
+	int len;
+	if (to[0] == '/' || !slash)
+		len = snprintf(dir, sizeof(dir), "%s", to);
+	else
+		len = snprintf(dir, sizeof(dir), "%.*s/%s", (int)(slash - link), link, to);
+	if (len < 0 || len >= (int)sizeof(dir))
+		return false;
+	char *base = strrchr(dir, '/');
+	const char *name = base ? base + 1 : dir;
+	if (base)
+		*base = '\0';
+	if (!realpath(base ? (dir[0] ? dir : "/") : ".", real))
+		return false;
+	return snprintf(out, size, "%s/%s", real, name) < (int)size;
+}
+
+/*
+ * A plain file, or none, gets the picture all at once through a rename, which replaces
+ * whatever lies there at that moment and follows nothing. One's own file keeps its mode,
+ * so a private one stays private. One's own link is followed, one's own pipe or device
+ * written into. Someone else's link, pipe or file in a shared folder is replaced as a
+ * missing file would be: it could lead to ~/.bashrc, or to a pipe they read.
+ */
 static void save_file(const char *file, const struct mem *png, char *saved, size_t size)
 {
-	if (strcmp(file, "-") == 0) {
+	struct stat st;
+	/* stdout itself, as - or /dev/stdout: written to, not opened, so a name swapped
+	 * meanwhile leads nowhere else. No path goes into the picture. */
+	if (strcmp(file, "-") == 0 || (stat(file, &st) == 0 && is_stdout(&st))) {
 		if (!write_all(STDOUT_FILENO, png->data, png->len))
 			die("cannot write to stdout: %s", strerror(errno));
 		return;
 	}
-	/*
-	 * A plain file gets its new content all at once, through a rename, and keeps its
-	 * mode: a private file stays private. Anything else is written into, as a shell's >
-	 * would: a link is followed and stays a link, a pipe stays a pipe. Someone else's
-	 * link is replaced, as a missing file would be: one put into a shared folder could
-	 * point at ~/.bashrc, or at a pipe its owner reads.
-	 */
-	struct stat st;
+	char target[PATH_MAX];
+	const char *path = file;
 	bool there = lstat(file, &st) == 0;
-	if (there && S_ISLNK(st.st_mode) && !link_to_follow(file, &st))
-		there = false;
-	else if (there && !S_ISREG(st.st_mode)) {
-		int fd = open(file, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0666);
-		if (fd < 0 || !write_all(fd, png->data, png->len))
-			die("cannot write %s: %s", file, strerror(errno));
-		/* No path into a pipe, nor into the picture itself, as with -f /dev/stdout. */
-		struct stat out;
-		bool plain = fstat(fd, &st) == 0 && S_ISREG(st.st_mode) &&
-			!(fstat(STDOUT_FILENO, &out) == 0 && out.st_dev == st.st_dev &&
-				out.st_ino == st.st_ino);
-		if (close(fd) < 0)
-			die("cannot write %s: %s", file, strerror(errno));
-		if (plain)
-			print_path(file, saved, size);
+	if (there && S_ISLNK(st.st_mode) && mine(&st)) {
+		if (realpath(file, target)) {
+			path = target;
+			there = lstat(path, &st) == 0;
+		} else if (errno == ENOENT && dangling_target(file, target, sizeof(target))) {
+			path = target;
+			there = false;
+		}
+	}
+	if (there && (S_ISFIFO(st.st_mode) || S_ISCHR(st.st_mode)) && mine(&st)) {
+		write_into(path, &st, png);
 		return;
 	}
 	char dir[PATH_MAX];
-	snprintf(dir, sizeof(dir), "%s", file);
+	snprintf(dir, sizeof(dir), "%s", path);
 	char *slash = strrchr(dir, '/');
 	if (!slash)
 		snprintf(dir, sizeof(dir), ".");
@@ -1443,15 +1516,15 @@ static void save_file(const char *file, const struct mem *png, char *saved, size
 		*slash = '\0';
 	char tmp[PATH_MAX];
 	int fd = temp_file(dir, tmp, sizeof(tmp));
-	if (there)
+	if (there && S_ISREG(st.st_mode) && st.st_uid == geteuid())
 		fchmod(fd, st.st_mode & 0777);
 	write_temp(fd, tmp, png);
-	if (rename(tmp, file) < 0) {
+	if (rename(tmp, path) < 0) {
 		int err = errno;
 		unlink(tmp);
 		die("cannot write %s: %s", file, strerror(err));
 	}
-	print_path(file, saved, size);
+	print_path(path, saved, size);
 }
 
 /* ---- the toast ---------------------------------------------------------------------- */
@@ -1999,7 +2072,8 @@ int main(int argc, char *argv[])
 		double x, y, w, h;
 		if (!select_rectangle(chosen, n, &x, &y, &w, &h))
 			die("given up, no screenshot");
-		cairo_surface_t *piece = cut(picture, origin_x, origin_y, sx, sy, x, y, w, h);
+		cairo_surface_t *piece = cut(picture, chosen, n, origin_x, origin_y, sx, sy,
+			x, y, w, h);
 		cairo_surface_destroy(picture);
 		picture = piece;
 	}

@@ -46,9 +46,10 @@ The pictures folder is `XDG_PICTURES_DIR` from `user-dirs.dirs` in `$XDG_CONFIG_
 New files get the mode the umask allows, 0644 under the usual 022. Files are named
 `Screenshot_2026-11-08_14-03-22.png`, a second one within the same second `..._2.png`.
 Nothing there is overwritten; `-f` replaces the file it is given. A file only shows up
-complete, and one that was there keeps its mode. A link of one's own given to `-f`
-stays a link and the picture goes where it points; someone else's is replaced, unless
-it leads to stdout. A named pipe or `/dev/stdout` gets the PNG and no path is printed.
+complete, and one of one's own that was there keeps its mode. A link of one's own given
+to `-f` stays a link and the picture goes where it points; one's own named pipe or
+`/dev/stdout` gets the PNG, and no path is printed. Someone else's link, pipe or file,
+as in a shared folder, is replaced as if nothing were there.
 
 Several monitors end up in one picture, laid out as they are. Rotated and flipped
 monitors come out the right way up.

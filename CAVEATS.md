@@ -65,6 +65,10 @@ reader may see it half written.
 
 Only the link given is checked for its owner, not the links it leads through.
 
+Between looking at the name and writing, someone who can write the folder can swap it.
+A swapped pipe or device is noticed and nothing is written; a plain file is replaced
+whatever lies there by then, so the picture may land in the folder as a new file.
+
 
 ## Errors
 

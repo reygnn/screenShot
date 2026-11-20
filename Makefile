@@ -87,6 +87,9 @@ build/nolink.so: tests/nolink.c | build
 	$(CC) $(CPPFLAGS) $(CFLAGS) -fPIC -shared $(LDFLAGS) -o $@ tests/nolink.c
 build/otheruid.so: tests/otheruid.c | build
 	$(CC) $(CPPFLAGS) $(CFLAGS) -fPIC -shared $(LDFLAGS) -o $@ tests/otheruid.c
+# A name swapped between looking and opening, as in a shared folder.
+build/swapopen.so: tests/swapopen.c | build
+	$(CC) $(CPPFLAGS) $(CFLAGS) -fPIC -shared $(LDFLAGS) -o $@ tests/swapopen.c -ldl
 
 install: screenShot
 	install -Dm755 screenShot $(DESTDIR)$(PREFIX)/bin/screenShot
@@ -99,7 +102,8 @@ build-test: | build
 	tests/build.sh
 
 # Needs a built mwc next to this directory, or in MWC_DIR, plus grim.
-test: build-test screenShot build/clipget build/pngcmp build/nolink.so build/otheruid.so
+test: build-test screenShot build/clipget build/pngcmp build/nolink.so build/otheruid.so \
+		build/swapopen.so
 	tests/test.sh
 
 # C lines at most 100 columns, tabs as 8, as in mwc.
