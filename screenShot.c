@@ -355,10 +355,8 @@ static void connect_display(void)
 	int n = 0;
 	struct dirent *e;
 	while ((e = readdir(d)) && n < 64) {
-		size_t len = strlen(e->d_name);
-		if (strncmp(e->d_name, "wayland-", 8) != 0 ||
-				(len > 5 && strcmp(e->d_name + len - 5, ".lock") == 0) ||
-				!is_socket(dir, e->d_name))
+		/* Sockets only: that leaves out wayland-0.lock and the like. */
+		if (strncmp(e->d_name, "wayland-", 8) != 0 || !is_socket(dir, e->d_name))
 			continue;
 		snprintf(names[n++], sizeof(names[0]), "%s", e->d_name);
 	}
@@ -1293,12 +1291,21 @@ static void write_temp(int fd, const char *tmp, const struct mem *png)
 	}
 }
 
-/* Prints the path, absolute, and keeps it in saved for the toast. */
+/* printf only buffers: a full disk or a reader gone shows only here. */
+static void flush_stdout(void)
+{
+	if (fflush(stdout) == EOF || ferror(stdout))
+		die("cannot write to stdout: %s", strerror(errno));
+}
+
+/* Prints the path, absolute, and keeps it in saved for the toast. The picture stays
+ * where it is when that fails, but whoever waits for the path is told. */
 static void print_path(const char *path, char *saved, size_t size)
 {
 	char abs[PATH_MAX];
 	snprintf(saved, size, "%s", realpath(path, abs) ? abs : path);
 	printf("%s\n", saved);
+	flush_stdout();
 }
 
 /*
@@ -1891,6 +1898,7 @@ int main(int argc, char *argv[])
 	}
 	if (version) {
 		printf("screenShot %s\n", SCREENSHOT_VERSION);
+		flush_stdout();
 		return 0;
 	}
 	/* A reader that leaves early must not kill the clipboard. */
@@ -1902,6 +1910,7 @@ int main(int argc, char *argv[])
 	read_outputs();
 	if (list) {
 		list_outputs();
+		flush_stdout();
 		return 0;
 	}
 	if (clipboard && !data_control)

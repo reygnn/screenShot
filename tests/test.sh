@@ -33,6 +33,8 @@ WALL=$SMOKE_DIR/wall.png
 export MWC_WALLPAPER=$WALL
 SHOT_ERR=$SMOKE_DIR/screenShot.err
 
+ms() { echo $(($(date +%s%N) / 1000000)); }
+
 expect() { # <description> <shell condition>: once, no state refresh, also without mwc
 	eval "$2" || fail "$1"
 	echo "ok: $1"
@@ -170,6 +172,15 @@ expect "-f /dev/stdout: as -f -, the PNG and nothing else" \
 	"\"$PNGCMP\" same \"$SMOKE_DIR/devout.png\" \"$WALL\""
 WAYLAND_DISPLAY=wayland-0 "$SHOT" -f - >"$SMOKE_DIR/stdout.png" 2>>"$LOG"
 expect "-f - writes the PNG to stdout" "\"$PNGCMP\" same \"$SMOKE_DIR/stdout.png\" \"$WALL\""
+# printf only buffers the path: a full disk shows when it is flushed.
+WAYLAND_DISPLAY=wayland-0 "$SHOT" -q -f "$SMOKE_DIR/full.png" >/dev/full 2>"$SHOT_ERR"
+expect "the path onto a full disk: status 1" "[ $? = 1 ]"
+expect "... saying so" "grep -q 'cannot write to stdout' \"$SHOT_ERR\""
+expect "... and the picture is saved all the same" "\"$PNGCMP\" same \"$SMOKE_DIR/full.png\" \"$WALL\""
+WAYLAND_DISPLAY=wayland-0 "$SHOT" -l >/dev/full 2>/dev/null
+expect "-l onto a full disk: status 1" "[ $? = 1 ]"
+"$SHOT" -v >/dev/full 2>/dev/null
+expect "-v onto a full disk: status 1" "[ $? = 1 ]"
 run_shot -f "$SMOKE_DIR/no/such/dir/a.png"
 expect "-f into a folder that is not there: status 1" "[ $STATUS = 1 ]"
 expect "... and a message" "grep -q 'cannot write' \"$SHOT_ERR\""
@@ -183,8 +194,11 @@ expect "-o with a name that is not there: status 1" "[ $STATUS = 1 ]"
 expect "... which says how to find the names" "grep -q 'screenShot -l' \"$SHOT_ERR\""
 run_shot -p -f "$SMOKE_DIR/p.png"
 expect "-p: status 0" "[ $STATUS = 0 ]"
-run_shot -d 0.3 -f "$SMOKE_DIR/d.png"
-expect "-d 0.3: status 0" "[ $STATUS = 0 ]"
+t0=$(ms)
+run_shot -d 0.5 -f "$SMOKE_DIR/d.png"
+t1=$(ms)
+expect "-d 0.5: status 0" "[ $STATUS = 0 ]"
+expect "-d 0.5 waits half a second first ($((t1 - t0)) ms)" "[ $((t1 - t0)) -ge 500 ]"
 
 # ---- the pictures folder ----------------------------------------------------------------
 
@@ -236,11 +250,15 @@ OUT=$(env -u WAYLAND_DISPLAY "$SHOT" -q -f "$SMOKE_DIR/nodisp.png" 2>>"$LOG")
 expect "without WAYLAND_DISPLAY it finds the compositor in XDG_RUNTIME_DIR" \
 	"[ \"\$OUT\" = \"$SMOKE_DIR/nodisp.png\" ]"
 same_as_grim "... and takes its screen" "$SMOKE_DIR/nodisp.png"
-# Something else listening first: a dead socket, a lock file.
+# Before wayland-0 in name order: a lock file, and the socket of a compositor that is
+# gone, which refuses the connection. Both are passed over.
 : >"$SMOKE_DIR/wayland-.lock"
+python3 -c 'import socket, sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' \
+	"$SMOKE_DIR/wayland-.dead" || fail "cannot make a dead socket"
 OUT=$(env -u WAYLAND_DISPLAY "$SHOT" -l 2>>"$LOG")
-expect "... past a lock file" "[ \"\$OUT\" = 'HEADLESS-1 1280x720+0+0 scale 1' ]"
-rm -f "$SMOKE_DIR/wayland-.lock"
+expect "... past a lock file and a dead socket" \
+	"[ \"\$OUT\" = 'HEADLESS-1 1280x720+0+0 scale 1' ]"
+rm -f "$SMOKE_DIR/wayland-.lock" "$SMOKE_DIR/wayland-.dead"
 WAYLAND_DISPLAY=wayland-9 "$SHOT" -l >/dev/null 2>"$SHOT_ERR"
 expect "a WAYLAND_DISPLAY that is not there: status 1" "[ $? = 1 ]"
 expect "... and it says which" "grep -q 'wayland-9' \"$SHOT_ERR\""
@@ -294,7 +312,6 @@ same_as_grim "... and still serves" "$SMOKE_DIR/clip5.png"
 TOAST_X=645 TOAST_Y=36
 toast_shown() { [ "$(pixel_now $TOAST_X $TOAST_Y)" = 2b2b2b ]; }
 toast_gone() { [ "$(pixel_now $TOAST_X $TOAST_Y)" = 00ff00 ]; }
-ms() { echo $(($(date +%s%N) / 1000000)); }
 
 clip image/png >/dev/null 2>&1 # the -c one above
 kill $(test_shots) 2>/dev/null
