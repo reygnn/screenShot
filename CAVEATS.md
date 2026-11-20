@@ -63,6 +63,8 @@ but not an owner or ACL other than screenShot's, and other hard links to it keep
 old picture. Through a link, a pipe or a device the PNG is written in place, so a
 reader may see it half written.
 
+Only the link given is checked for its owner, not the links it leads through.
+
 
 ## Errors
 

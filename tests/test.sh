@@ -4,21 +4,26 @@
 # its own Wayland socket and runtime directory.
 #
 # Needs a built mwc in MWC_DIR (by default ../mwc) with build/vinput, build/pngtool and
-# build/capturec, grim, and from here build/clipget, build/pngcmp and build/nolink.so.
-# Output goes to build/test.log.
+# build/capturec, grim, and from here build/clipget, build/pngcmp, build/nolink.so and
+# build/otheruid.so. Output goes to build/test.log.
 SHOT_DIR=$(cd "$(dirname "$0")/.." && pwd)
 SHOT=$SHOT_DIR/screenShot
 CLIPGET=$SHOT_DIR/build/clipget
 PNGCMP=$SHOT_DIR/build/pngcmp
 NOLINK=$SHOT_DIR/build/nolink.so
+OTHERUID=$SHOT_DIR/build/otheruid.so
 LOG=$SHOT_DIR/build/test.log
 MWC_DIR=${MWC_DIR:-$SHOT_DIR/../mwc}
-for tool in "$SHOT" "$CLIPGET" "$PNGCMP" "$NOLINK"; do
+for tool in "$SHOT" "$CLIPGET" "$PNGCMP" "$NOLINK" "$OTHERUID"; do
 	[ -f "$tool" ] || { echo "FAIL: $tool not built"; exit 1; }
 done
 [ -d "$MWC_DIR" ] || { echo "FAIL: no mwc in $MWC_DIR (set MWC_DIR)"; exit 1; }
 cd "$MWC_DIR" || exit 1
 . tests/lib.sh
+# Nothing here may reach the running session, also before the first mwc: a regression
+# in the option checks would otherwise copy into its clipboard or freeze its screen.
+export XDG_RUNTIME_DIR=$SMOKE_DIR
+unset WAYLAND_DISPLAY
 require_tools grim
 for tool in build/vinput build/pngtool build/capturec; do
 	[ -x "$tool" ] || { echo "FAIL: $MWC_DIR/$tool not built (make $tool)"; exit 1; }
@@ -116,7 +121,7 @@ done
 # -l and -v stand alone, whatever the order: nothing given with them is ignored. -q
 # holds for them anyway.
 for args in "-l -c" "-l -f x.png" "-l -o X" "-l -r" "-l -p" "-l -d 1" "-l -v" \
-		"-v -l" "-v -c" "-v -o X" "-v x" "-l x"; do
+		"-v -l" "-v -c" "-v -o X" "-v x" "-l x" "-h x" "-h -c" "-h -v" "-l -h"; do
 	"$SHOT" $args >/dev/null 2>&1
 	expect "$args: status 2" "[ $? = 2 ]"
 done
@@ -159,6 +164,27 @@ ln -s real/y.png "$SMOKE_DIR/nowhere.png"
 run_shot -f "$SMOKE_DIR/nowhere.png"
 expect "-f on a link to nowhere: still a link" "[ -L \"$SMOKE_DIR/nowhere.png\" ]"
 expect "... and the file it names is made" "\"$PNGCMP\" same \"$SMOKE_DIR/real/y.png\" \"$WALL\""
+# Someone else's link, as one put into a shared folder, is not followed: it could point
+# at ~/.bashrc. It is replaced, and what it points at stays as it was.
+: >"$SMOKE_DIR/real/z.png"
+ln -s real/z.png "$SMOKE_DIR/theirs.png"
+LD_PRELOAD=$OTHERUID run_shot -f "$SMOKE_DIR/theirs.png"
+expect "-f on someone else's link: replaced by the picture" \
+	"[ ! -L \"$SMOKE_DIR/theirs.png\" ] && \"$PNGCMP\" same \"$SMOKE_DIR/theirs.png\" \"$WALL\""
+expect "... and what it pointed at is untouched" "[ ! -s \"$SMOKE_DIR/real/z.png\" ]"
+ln -s real/w.png "$SMOKE_DIR/theirs2.png"
+LD_PRELOAD=$OTHERUID run_shot -f "$SMOKE_DIR/theirs2.png"
+expect "... a link of theirs to nowhere makes nothing there" "[ ! -e \"$SMOKE_DIR/real/w.png\" ]"
+LD_PRELOAD=$OTHERUID WAYLAND_DISPLAY=wayland-0 "$SHOT" -f /dev/stdout \
+	>"$SMOKE_DIR/devout2.png" 2>>"$LOG"
+expect "... but one to stdout, as /dev/stdout, is followed" \
+	"\"$PNGCMP\" same \"$SMOKE_DIR/devout2.png\" \"$WALL\""
+mkfifo "$SMOKE_DIR/their-pipe"
+ln -s their-pipe "$SMOKE_DIR/theirs3.png"
+LD_PRELOAD=$OTHERUID WAYLAND_DISPLAY=wayland-0 timeout "$TIMEOUT" "$SHOT" -q \
+	-f "$SMOKE_DIR/theirs3.png" >/dev/null 2>>"$LOG"
+expect "... and one to their pipe is not: replaced, nothing goes to them" \
+	"[ $? = 0 ] && [ ! -L \"$SMOKE_DIR/theirs3.png\" ] && [ -p \"$SMOKE_DIR/their-pipe\" ]"
 mkfifo "$SMOKE_DIR/pipe"
 timeout "$TIMEOUT" cat "$SMOKE_DIR/pipe" >"$SMOKE_DIR/piped.png" &
 reader=$!
@@ -181,6 +207,8 @@ WAYLAND_DISPLAY=wayland-0 "$SHOT" -l >/dev/full 2>/dev/null
 expect "-l onto a full disk: status 1" "[ $? = 1 ]"
 "$SHOT" -v >/dev/full 2>/dev/null
 expect "-v onto a full disk: status 1" "[ $? = 1 ]"
+"$SHOT" -h >/dev/full 2>/dev/null
+expect "-h onto a full disk: status 1" "[ $? = 1 ]"
 run_shot -f "$SMOKE_DIR/no/such/dir/a.png"
 expect "-f into a folder that is not there: status 1" "[ $STATUS = 1 ]"
 expect "... and a message" "grep -q 'cannot write' \"$SHOT_ERR\""
@@ -623,6 +651,35 @@ for corner in "$l $t ff0000" "$r $t 00ff00" "$l $b 0000ff" "$r $b ffffff"; do
 	got=$(build/pngtool pixel "$SMOKE_DIR/mixed.png" "$1" "$2")
 	expect "two scales: the scaled up corner at $1,$2 is $3 ($got)" "[ \"$got\" = $3 ]"
 done
+stop_mwc
+
+# Both at 1.3, but 1280x720 and 1920x1080: their logical sizes are cut off to whole
+# numbers, so the scales differ in the fourth place. Neither may be resampled for that:
+# each piece of the picture is its monitor's frame, pixel for pixel.
+printf 'Mwm*HEADLESS-%s*outputScale: 1.3\n' 1 2 >"$XDG_CONFIG_HOME/mwc/mwmrc"
+printf 'Mwm*HEADLESS-2*outputMode: 1920x1080\n' >>"$XDG_CONFIG_HOME/mwc/mwmrc"
+begin
+run_shot -l
+echo "$OUT" >"$SMOKE_DIR/layout"
+run_shot -f "$SMOKE_DIR/same13.png"
+expect "1.3 on two sizes: status 0" "[ $STATUS = 0 ]"
+while read -r name box _; do
+	capturec frame "$name" "$SMOKE_DIR/frame-$name.png" 2>>"$LOG" || fail "capturec $name"
+	echo "$name $box $("$PNGCMP" size "$SMOKE_DIR/frame-$name.png")"
+done <"$SMOKE_DIR/layout" >"$SMOKE_DIR/boxes"
+# name WxH+X+Y MWxMH: where each frame lies, as compose() places it.
+awk '{ split($2, a, /[x+]/); split($3, m, "x"); n[NR] = $1; x[NR] = a[3]; y[NR] = a[4]
+	mw[NR] = m[1]; mh[NR] = m[2]; sx = m[1] / a[1]; sy = m[2] / a[2]
+	if (sx > scx) scx = sx; if (sy > scy) scy = sy
+	if (NR == 1 || a[3] < ox) ox = a[3]; if (NR == 1 || a[4] < oy) oy = a[4] }
+	END { for (i = 1; i <= NR; i++) printf "%s %d %d %d %d\n", n[i],
+		int((x[i] - ox) * scx + 0.5), int((y[i] - oy) * scy + 0.5), mw[i], mh[i] }' \
+	"$SMOKE_DIR/boxes" >"$SMOKE_DIR/pieces"
+while read -r name px py mw mh; do
+	"$PNGCMP" crop "$SMOKE_DIR/same13.png" "$px" "$py" "$mw" "$mh" "$SMOKE_DIR/piece.png"
+	expect "1.3 on two sizes: $name ($mw x $mh at $px,$py) is its frame" \
+		"\"$PNGCMP\" same \"$SMOKE_DIR/piece.png\" \"$SMOKE_DIR/frame-$name.png\""
+done <"$SMOKE_DIR/pieces"
 stop_mwc
 rm "$XDG_CONFIG_HOME/mwc/mwmrc"
 unset WLR_HEADLESS_OUTPUTS

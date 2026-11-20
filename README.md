@@ -17,7 +17,7 @@ all monitors, one monitor, or a rectangle drawn with the mouse. It is made for
     screenShot -l           list the monitors
     screenShot -v           print the version and the commit built
 
-`-l` and `-v` stand alone. Exit status 0 on success, 1 on an error (message on stderr),
+`-l`, `-v` and `-h` stand alone. Exit status 0 on success, 1 on an error (message on stderr),
 2 for bad options.
 
 
@@ -46,9 +46,9 @@ The pictures folder is `XDG_PICTURES_DIR` from `user-dirs.dirs` in `$XDG_CONFIG_
 New files get the mode the umask allows, 0644 under the usual 022. Files are named
 `Screenshot_2026-11-08_14-03-22.png`, a second one within the same second `..._2.png`.
 Nothing there is overwritten; `-f` replaces the file it is given. A file only shows up
-complete, and one that was there keeps its mode. A link given to `-f` stays a link and
-the picture goes where it points; a named pipe or `/dev/stdout` gets the PNG and no
-path is printed.
+complete, and one that was there keeps its mode. A link of one's own given to `-f`
+stays a link and the picture goes where it points; someone else's is replaced, unless
+it leads to stdout. A named pipe or `/dev/stdout` gets the PNG and no path is printed.
 
 Several monitors end up in one picture, laid out as they are. Rotated and flipped
 monitors come out the right way up.

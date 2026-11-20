@@ -82,9 +82,11 @@ build/clipget: tests/clipget.c build/ext-data-control-v1-client-protocol.h \
 build/pngcmp: tests/pngcmp.c | build
 	$(CC) $(SHOT_CFLAGS) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ tests/pngcmp.c \
 		$(SHOT_LIBS) $(LDLIBS)
-# A filesystem without hard links, through LD_PRELOAD.
+# A filesystem without hard links, and someone else's files, through LD_PRELOAD.
 build/nolink.so: tests/nolink.c | build
 	$(CC) $(CPPFLAGS) $(CFLAGS) -fPIC -shared $(LDFLAGS) -o $@ tests/nolink.c
+build/otheruid.so: tests/otheruid.c | build
+	$(CC) $(CPPFLAGS) $(CFLAGS) -fPIC -shared $(LDFLAGS) -o $@ tests/otheruid.c
 
 install: screenShot
 	install -Dm755 screenShot $(DESTDIR)$(PREFIX)/bin/screenShot
@@ -97,7 +99,7 @@ build-test: | build
 	tests/build.sh
 
 # Needs a built mwc next to this directory, or in MWC_DIR, plus grim.
-test: build-test screenShot build/clipget build/pngcmp build/nolink.so
+test: build-test screenShot build/clipget build/pngcmp build/nolink.so build/otheruid.so
 	tests/test.sh
 
 # C lines at most 100 columns, tabs as 8, as in mwc.

@@ -625,25 +625,54 @@ static void swap_red_blue(struct output *o)
  * monitor covers stays black. Where it begins in the layout and its pixels per logical
  * pixel go to *origin_x, *origin_y, *scale_x and *scale_y.
  */
+/*
+ * Where an output goes in the picture, in its pixels, and by how much it is scaled. One
+ * off by less than a pixel over its whole size is copied as it is: the logical sizes are
+ * whole numbers, so 1280x720 and 1920x1080 at 1.3 get slightly different scales.
+ */
+static void place(const struct output *o, int x0, int y0, double scx, double scy,
+	double *px, double *py, double *rx, double *ry)
+{
+	int x, y, w, h, tw, th;
+	logical_box(o, &x, &y, &w, &h);
+	transformed_size(o, &tw, &th);
+	double sx, sy;
+	output_scale(o, &sx, &sy);
+	*rx = scx / sx;
+	*ry = scy / sy;
+	*px = (x - x0) * scx;
+	*py = (y - y0) * scy;
+	if (fabs(*rx - 1) * tw < 1 && fabs(*ry - 1) * th < 1) {
+		*rx = *ry = 1;
+		*px = round(*px);
+		*py = round(*py);
+	}
+}
+
 static cairo_surface_t *compose(struct output **list, int n, int *origin_x, int *origin_y,
 	double *scale_x, double *scale_y)
 {
-	int x0 = INT_MAX, y0 = INT_MAX, x1 = INT_MIN, y1 = INT_MIN;
+	int x0 = INT_MAX, y0 = INT_MAX;
 	double scx = 0, scy = 0;
 	for (int i = 0; i < n; i++) {
 		int x, y, w, h;
 		logical_box(list[i], &x, &y, &w, &h);
 		if (x < x0) x0 = x;
 		if (y < y0) y0 = y;
-		if (x + w > x1) x1 = x + w;
-		if (y + h > y1) y1 = y + h;
 		double sx, sy;
 		output_scale(list[i], &sx, &sy);
 		scx = fmax(scx, sx);
 		scy = fmax(scy, sy);
 	}
-	int width = (int)((x1 - x0) * scx + 0.5);
-	int height = (int)((y1 - y0) * scy + 0.5);
+	int width = 0, height = 0;
+	for (int i = 0; i < n; i++) {
+		int tw, th;
+		double px, py, rx, ry;
+		transformed_size(list[i], &tw, &th);
+		place(list[i], x0, y0, scx, scy, &px, &py, &rx, &ry);
+		width = fmax(width, (int)(px + tw * rx + 0.5));
+		height = fmax(height, (int)(py + th * ry + 0.5));
+	}
 	cairo_surface_t *out = cairo_image_surface_create(CAIRO_FORMAT_RGB24, width, height);
 	if (cairo_surface_status(out) != CAIRO_STATUS_SUCCESS)
 		die("cannot make a %dx%d picture", width, height);
@@ -656,16 +685,13 @@ static cairo_surface_t *compose(struct output **list, int n, int *origin_x, int 
 		/* Alpha on a screen means nothing: x or a, it is opaque. */
 		cairo_surface_t *src = cairo_image_surface_create_for_data(o->data,
 			CAIRO_FORMAT_RGB24, o->width, o->height, o->stride);
-		int x, y, w, h, tw, th;
-		logical_box(o, &x, &y, &w, &h);
+		int tw, th;
 		transformed_size(o, &tw, &th);
-		double sx, sy;
-		output_scale(o, &sx, &sy);
-		sx = scx / sx;
-		sy = scy / sy;
+		double px, py, sx, sy;
+		place(o, x0, y0, scx, scy, &px, &py, &sx, &sy);
 
 		cairo_save(cr);
-		cairo_translate(cr, (x - x0) * scx, (y - y0) * scy);
+		cairo_translate(cr, px, py);
 		cairo_scale(cr, sx, sy);
 		cairo_pattern_t *p = cairo_pattern_create_for_surface(src);
 		cairo_matrix_t m;
@@ -1362,6 +1388,17 @@ static void save_default(const struct mem *png, char *saved, size_t size)
 	die("too many screenshots named %s in %s", stamp, dir);
 }
 
+/* One's own or root's link, or one to stdout itself, as /dev/stdout is. In a container
+ * root's may show as nobody's, so stdout is told by what it is, not by who owns it. */
+static bool link_to_follow(const char *file, const struct stat *link)
+{
+	if (link->st_uid == geteuid() || link->st_uid == 0)
+		return true;
+	struct stat to, out;
+	return stat(file, &to) == 0 && fstat(STDOUT_FILENO, &out) == 0 &&
+		to.st_dev == out.st_dev && to.st_ino == out.st_ino;
+}
+
 static void save_file(const char *file, const struct mem *png, char *saved, size_t size)
 {
 	if (strcmp(file, "-") == 0) {
@@ -1372,11 +1409,15 @@ static void save_file(const char *file, const struct mem *png, char *saved, size
 	/*
 	 * A plain file gets its new content all at once, through a rename, and keeps its
 	 * mode: a private file stays private. Anything else is written into, as a shell's >
-	 * would: a link is followed and stays a link, a pipe stays a pipe.
+	 * would: a link is followed and stays a link, a pipe stays a pipe. Someone else's
+	 * link is replaced, as a missing file would be: one put into a shared folder could
+	 * point at ~/.bashrc, or at a pipe its owner reads.
 	 */
 	struct stat st;
 	bool there = lstat(file, &st) == 0;
-	if (there && !S_ISREG(st.st_mode)) {
+	if (there && S_ISLNK(st.st_mode) && !link_to_follow(file, &st))
+		there = false;
+	else if (there && !S_ISREG(st.st_mode)) {
 		int fd = open(file, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0666);
 		if (fd < 0 || !write_all(fd, png->data, png->len))
 			die("cannot write %s: %s", file, strerror(errno));
@@ -1884,16 +1925,17 @@ int main(int argc, char *argv[])
 			return 2;
 		}
 	}
-	/* -l and -v stand alone: anything else with them would be ignored. -q, no toast,
-	 * holds for them anyway. */
+	/* -l, -v and -h stand alone: anything else with them would be ignored. -q, no
+	 * toast, holds for them anyway. */
 	bool shot = clipboard || file || only || region || pointer || delayed;
-	if (optind < argc || (clipboard && file) || (list && (shot || version)) ||
-			(version && shot)) {
+	if (optind < argc || (clipboard && file) || (list && (shot || version || help)) ||
+			(version && (shot || help)) || (help && shot)) {
 		usage(stderr);
 		return 2;
 	}
 	if (help) {
 		usage(stdout);
+		flush_stdout();
 		return 0;
 	}
 	if (version) {
