@@ -16,6 +16,12 @@ overlay is never in the picture.
 Only 8 bit shm formats are taken (XRGB, ARGB, XBGR, ABGR8888). A compositor that
 offers only 10 bit ones gets "no shm format".
 
+The stride the compositor gives for a buffer is taken as it is. One of less than four
+bytes a pixel would have screenShot read past the buffer.
+
+Little endian only: wl_shm's formats are little endian, and screenShot reads them as
+cairo's, which are native. On a big endian machine the colours come out swapped.
+
 
 ## Clipboard
 

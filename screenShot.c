@@ -107,7 +107,7 @@ static void usage(FILE *f)
 		"  -c         to the clipboard, as image/png\n"
 		"  -f FILE    to FILE, - for stdout\n"
 		"  -r         a rectangle: drag it with the mouse, a click takes the\n"
-		"             monitor, Esc or the right button gives up\n"
+		"             monitor, Esc or another button gives up\n"
 		"  -o NAME    only that monitor\n"
 		"  -d SECONDS wait that long first\n"
 		"  -p         with the mouse pointer\n"
@@ -312,7 +312,7 @@ static bool try_display(const char *name)
 
 static int compare_names(const void *a, const void *b)
 {
-	return strcmp(*(char *const *)a, *(char *const *)b);
+	return strcmp(a, b);
 }
 
 static bool is_socket(const char *dir, const char *name)
@@ -350,7 +350,8 @@ static void connect_display(void)
 	if (!d)
 		die("WAYLAND_DISPLAY is not set and %s cannot be read: %s", dir,
 			strerror(errno));
-	char *names[64];
+	/* In place, not strdup'ed: nothing here can run out of memory. */
+	char names[64][sizeof(((struct dirent *)0)->d_name)];
 	int n = 0;
 	struct dirent *e;
 	while ((e = readdir(d)) && n < 64) {
@@ -359,18 +360,17 @@ static void connect_display(void)
 				(len > 5 && strcmp(e->d_name + len - 5, ".lock") == 0) ||
 				!is_socket(dir, e->d_name))
 			continue;
-		names[n++] = strdup(e->d_name);
+		snprintf(names[n++], sizeof(names[0]), "%s", e->d_name);
 	}
 	closedir(d);
-	qsort(names, n, sizeof(*names), compare_names);
+	qsort(names, n, sizeof(names[0]), compare_names);
 	bool found = false;
-	for (int i = 0; i < n; i++) {
-		if (!found && try_display(names[i])) {
+	for (int i = 0; i < n && !found; i++) {
+		if (try_display(names[i])) {
 			found = true;
 			/* For the clipboard child and anything it might start. */
 			setenv("WAYLAND_DISPLAY", names[i], 1);
 		}
-		free(names[i]);
 	}
 	if (!found)
 		die("WAYLAND_DISPLAY is not set, and no compositor with wlr-screencopy "
@@ -498,6 +498,20 @@ static void capture(struct output *o, bool pointer)
 {
 	o->frame = zwlr_screencopy_manager_v1_capture_output(screencopy, pointer, o->wl);
 	zwlr_screencopy_frame_v1_add_listener(o->frame, &frame_listener, o);
+}
+
+/* Once the picture is made: the clipboard process may stay for hours, with only the PNG. */
+static void release_capture(struct output *o)
+{
+	if (o->frame)
+		zwlr_screencopy_frame_v1_destroy(o->frame);
+	if (o->buffer)
+		wl_buffer_destroy(o->buffer);
+	if (o->data)
+		munmap(o->data, o->size);
+	o->frame = NULL;
+	o->buffer = NULL;
+	o->data = NULL;
 }
 
 /* ---- the picture -------------------------------------------------------------------- */
@@ -1558,6 +1572,10 @@ static void go_background(void)
 	if (pid > 0)
 		_exit(0); /* the child keeps the connection: no disconnect here */
 	setsid();
+	/* It may live for hours: it must not keep a directory busy, a stick from unmounting. */
+	if (chdir("/") < 0) {
+		/* Then it stays where it is; the clipboard matters more. */
+	}
 	int null = open("/dev/null", O_RDWR);
 	if (null >= 0) {
 		dup2(null, STDIN_FILENO);
@@ -1758,6 +1776,7 @@ static void to_clipboard(struct mem *png, cairo_surface_t *picture)
 			cairo_image_surface_get_width(picture),
 			cairo_image_surface_get_height(picture));
 		show_toast(picture, "Screenshot copied", detail);
+		cairo_surface_destroy(picture);
 	}
 	while (!clip_cancelled && wl_display_dispatch(display) >= 0)
 		;
@@ -1783,6 +1802,7 @@ static void list_outputs(void)
 int main(int argc, char *argv[])
 {
 	bool clipboard = false, pointer = false, list = false, region = false, quiet = false;
+	bool version = false, help = false, delayed = false;
 	const char *file = NULL, *only = NULL;
 	double delay = 0;
 	int opt;
@@ -1806,6 +1826,7 @@ int main(int argc, char *argv[])
 				fprintf(stderr, "screenShot: -d wants seconds, not %s\n", optarg);
 				return 2;
 			}
+			delayed = true;
 			break;
 		}
 		case 'p':
@@ -1821,19 +1842,31 @@ int main(int argc, char *argv[])
 			region = true;
 			break;
 		case 'v':
-			printf("screenShot %s\n", SCREENSHOT_VERSION);
-			return 0;
+			version = true;
+			break;
 		case 'h':
-			usage(stdout);
-			return 0;
+			help = true;
+			break;
 		default:
 			usage(stderr);
 			return 2;
 		}
 	}
-	if (optind < argc || (clipboard && file)) {
+	/* -l and -v stand alone: anything else with them would be ignored. -q, no toast,
+	 * holds for them anyway. */
+	bool shot = clipboard || file || only || region || pointer || delayed;
+	if (optind < argc || (clipboard && file) || (list && (shot || version)) ||
+			(version && shot)) {
 		usage(stderr);
 		return 2;
+	}
+	if (help) {
+		usage(stdout);
+		return 0;
+	}
+	if (version) {
+		printf("screenShot %s\n", SCREENSHOT_VERSION);
+		return 0;
 	}
 	/* A reader that leaves early must not kill the clipboard. */
 	signal(SIGPIPE, SIG_IGN);
@@ -1894,12 +1927,18 @@ int main(int argc, char *argv[])
 		cairo_surface_destroy(picture);
 		picture = piece;
 	}
+	for (int i = 0; i < n; i++)
+		release_capture(chosen[i]);
 	struct mem png = { 0 };
 	encode_png(picture, &png);
 
 	char saved[PATH_MAX] = "";
 	if (clipboard) {
-		to_clipboard(&png, quiet ? NULL : picture);
+		if (quiet) {
+			cairo_surface_destroy(picture);
+			picture = NULL;
+		}
+		to_clipboard(&png, picture);
 	} else if (file) {
 		save_file(file, &png, saved, sizeof(saved));
 		/* Into a pipe: someone else takes it from there. */

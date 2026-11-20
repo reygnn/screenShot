@@ -111,6 +111,15 @@ for d in "" nan 0x10 inf -1; do
 	"$SHOT" -d "$d" -l >/dev/null 2>&1
 	expect "-d '$d': status 2" "[ $? = 2 ]"
 done
+# -l and -v stand alone, whatever the order: nothing given with them is ignored. -q
+# holds for them anyway.
+for args in "-l -c" "-l -f x.png" "-l -o X" "-l -r" "-l -p" "-l -d 1" "-l -v" \
+		"-v -l" "-v -c" "-v -o X" "-v x" "-l x"; do
+	"$SHOT" $args >/dev/null 2>&1
+	expect "$args: status 2" "[ $? = 2 ]"
+done
+"$SHOT" -h | grep -q 'Esc or another button gives up'
+expect "-h: any button but the left one gives -r up" "[ $? = 0 ]"
 
 # ---- one monitor, a file ---------------------------------------------------------------
 
@@ -236,6 +245,16 @@ run_shot -c
 wait_for "a new copy ends the one before" one_shot
 clip image/png >"$SMOKE_DIR/clip3.png" 2>>"$LOG"
 same_as_grim "and the new one serves" "$SMOKE_DIR/clip3.png"
+# The one that stays may stay for hours: in /, so it keeps no directory busy, and with
+# only the PNG, not the capture's buffer.
+mkdir "$SMOKE_DIR/cwd"
+(cd "$SMOKE_DIR/cwd" && run_shot -c)
+wait_for "a copy from another directory" one_shot
+holder=$(test_shots)
+expect "the clipboard's process is in /" "[ \"\$(readlink /proc/$holder/cwd)\" = / ]"
+expect "... and keeps no buffer of the capture" "! grep -q memfd:screenShot /proc/$holder/maps"
+clip image/png >"$SMOKE_DIR/clip5.png" 2>>"$LOG"
+same_as_grim "... and still serves" "$SMOKE_DIR/clip5.png"
 
 # ---- the toast -----------------------------------------------------------------------------
 
@@ -284,6 +303,8 @@ wait_for "-c: the toast goes" toast_gone
 clip image/png >"$SMOKE_DIR/tclip2.png" 2>>"$LOG"
 expect "-c: and pasting still works after it" "\"$PNGCMP\" same \"$SMOKE_DIR/tclip.png\" \"$SMOKE_DIR/tclip2.png\""
 expect "-c: one screenShot stays for the clipboard" "[ \"\$(shot_count)\" = 1 ]"
+expect "-c: once the toast is gone, it keeps no buffer" \
+	"! grep -q memfd:screenShot /proc/\$(test_shots)/maps"
 
 stop_mwc
 poll "the clipboard screenShot ends with the compositor" no_shots

@@ -24,7 +24,8 @@ In `tests/test.sh`, `expect` checks once and works without mwc; `check`, `wait_f
 ## Rules
 
 - One C file, `screenShot.c`, no window of its own.
-- Tests compare against grim pixel for pixel.
+- Tests compare against grim pixel for pixel. Where grim itself is wrong (it loses a row
+  at some fractional scales), against the frame from mwc's `build/capturec`.
 - Tests count and stop only their own screenShot processes (by `SMOKE_DIR` in their
   environment), never the running session's, for example the one holding its clipboard.
 - A test client screenShot needs belongs in mwc's `tests/`, not here.

@@ -14,9 +14,11 @@ all monitors, one monitor, or a rectangle drawn with the mouse. It is made for
     screenShot -d SECONDS   wait that long first
     screenShot -p           with the mouse pointer
     screenShot -q           no toast afterwards
+    screenShot -l           list the monitors
     screenShot -v           print the version and the commit built
 
-Exit status 0 on success, 1 on an error (message on stderr), 2 for bad options.
+`-l` and `-v` stand alone. Exit status 0 on success, 1 on an error (message on stderr),
+2 for bad options.
 
 
 ## Build
