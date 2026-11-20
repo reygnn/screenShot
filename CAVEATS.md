@@ -10,6 +10,10 @@ A screenshot taken while a toast is up has that toast in it.
 Gaps between monitors stay black. With different scales the picture gets the largest
 one, so no monitor loses resolution and the others are scaled up.
 
+At a fractional scale the compositor cuts logical sizes off to whole numbers, so a
+monitor's box in the picture can be a pixel wider or narrower than the monitor. Wider,
+its last column or row comes twice; narrower, the next monitor covers it.
+
 `-r` works on a still taken first, so menus and tooltips stay as they were, and the
 overlay is never in the picture.
 
@@ -60,14 +64,15 @@ A drag shorter than one logical pixel in both directions counts as a click.
 
 A plain file is replaced through a rename, so it shows up complete. It keeps its mode,
 but not an owner or ACL other than screenShot's, and other hard links to it keep the
-old picture. Through a link, a pipe or a device the PNG is written in place, so a
-reader may see it half written.
+old picture. Into a pipe or device the PNG is written as it comes.
 
-Only the link given is checked for its owner, not the links it leads through.
+A link is replaced like a file, also one's own: screenShot doesn't write through links,
+so none, also not someone else's further on, can lead it to another file.
 
-Between looking at the name and writing, someone who can write the folder can swap it.
-A swapped pipe or device is noticed and nothing is written; a plain file is replaced
-whatever lies there by then, so the picture may land in the folder as a new file.
+A pipe of one's own that nobody reads keeps screenShot waiting, as it would a shell.
+
+Someone who can write the folder can swap the name until the rename; whatever lies
+there then is replaced, so the picture lands there as a new file, never elsewhere.
 
 
 ## Errors

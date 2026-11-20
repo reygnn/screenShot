@@ -147,47 +147,43 @@ expect "-f overwrites a file it is told to" "[ $? = 0 ]"
 expect "-f: mode 644 under umask 022" "[ \$(stat -c %a \"$SMOKE_DIR/new.png\") = 644 ]"
 (umask 077 && run_shot -f "$SMOKE_DIR/private.png")
 expect "-f: mode 600 under umask 077" "[ \$(stat -c %a \"$SMOKE_DIR/private.png\") = 600 ]"
-# What is there already keeps what it is: a private file stays private, a link stays a
-# link and the picture goes where it points, a pipe gets the picture.
+# What is there already: one's own file keeps its mode, so a private one stays private.
+# A link is replaced, and what it leads to stays as it was, also through someone else's
+# link on the way. One's own pipe gets the picture; someone else's pipe or file is
+# replaced as if nothing were there.
 : >"$SMOKE_DIR/kept.png"
 chmod 600 "$SMOKE_DIR/kept.png"
 (umask 022 && run_shot -f "$SMOKE_DIR/kept.png")
 expect "-f on a file of mode 600 keeps it 600" "[ \$(stat -c %a \"$SMOKE_DIR/kept.png\") = 600 ]"
 expect "... and puts the picture in" "\"$PNGCMP\" same \"$SMOKE_DIR/kept.png\" \"$WALL\""
 mkdir "$SMOKE_DIR/real"
-: >"$SMOKE_DIR/real/x.png"
+echo old >"$SMOKE_DIR/real/x.png"
 ln -s real/x.png "$SMOKE_DIR/link.png"
 run_shot -f "$SMOKE_DIR/link.png"
-expect "-f on a link: still a link" "[ -L \"$SMOKE_DIR/link.png\" ]"
-expect "... the picture where it points" "\"$PNGCMP\" same \"$SMOKE_DIR/real/x.png\" \"$WALL\""
-expect "... and that is the path printed" "[ \"\$OUT\" = \"$SMOKE_DIR/real/x.png\" ]"
-expect "... no temporary file left there" "[ \"\$(ls -A \"$SMOKE_DIR/real\")\" = x.png ]"
+expect "-f on a link: replaced by the picture" \
+	"[ ! -L \"$SMOKE_DIR/link.png\" ] && \"$PNGCMP\" same \"$SMOKE_DIR/link.png\" \"$WALL\""
+expect "... what it pointed at is untouched" "[ \"\$(cat \"$SMOKE_DIR/real/x.png\")\" = old ]"
+expect "... and the path printed is the link's" "[ \"\$OUT\" = \"$SMOKE_DIR/link.png\" ]"
 ln -s real/y.png "$SMOKE_DIR/nowhere.png"
 run_shot -f "$SMOKE_DIR/nowhere.png"
-expect "-f on a link to nowhere: still a link" "[ -L \"$SMOKE_DIR/nowhere.png\" ]"
-expect "... and the file it names is made" "\"$PNGCMP\" same \"$SMOKE_DIR/real/y.png\" \"$WALL\""
-# Someone else's link, as one put into a shared folder, is not followed: it could point
-# at ~/.bashrc. It is replaced, and what it points at stays as it was.
-: >"$SMOKE_DIR/real/z.png"
-ln -s real/z.png "$SMOKE_DIR/theirs.png"
-LD_PRELOAD=$OTHERUID run_shot -f "$SMOKE_DIR/theirs.png"
-expect "-f on someone else's link: replaced by the picture" \
-	"[ ! -L \"$SMOKE_DIR/theirs.png\" ] && \"$PNGCMP\" same \"$SMOKE_DIR/theirs.png\" \"$WALL\""
-expect "... and what it pointed at is untouched" "[ ! -s \"$SMOKE_DIR/real/z.png\" ]"
-ln -s real/w.png "$SMOKE_DIR/theirs2.png"
-LD_PRELOAD=$OTHERUID run_shot -f "$SMOKE_DIR/theirs2.png"
-expect "... a link of theirs to nowhere makes nothing there" "[ ! -e \"$SMOKE_DIR/real/w.png\" ]"
+expect "-f on a link to nowhere: replaced, nothing made where it pointed" \
+	"[ ! -L \"$SMOKE_DIR/nowhere.png\" ] && [ ! -e \"$SMOKE_DIR/real/y.png\" ]"
+echo secret >"$SMOKE_DIR/victim"
+ln -s victim "$SMOKE_DIR/their-link"
+ln -s their-link "$SMOKE_DIR/my-link.png"
+run_shot -f "$SMOKE_DIR/my-link.png"
+expect "-f on one's link to someone else's link to a file: that file is untouched" \
+	"[ \"\$(cat \"$SMOKE_DIR/victim\")\" = secret ] && [ ! -L \"$SMOKE_DIR/my-link.png\" ]"
 LD_PRELOAD=$OTHERUID WAYLAND_DISPLAY=wayland-0 "$SHOT" -f /dev/stdout \
 	>"$SMOKE_DIR/devout2.png" 2>>"$LOG"
-expect "... but one to stdout, as /dev/stdout, is followed" \
+expect "-f /dev/stdout, whoever owns the link: written to stdout" \
 	"\"$PNGCMP\" same \"$SMOKE_DIR/devout2.png\" \"$WALL\""
 mkfifo "$SMOKE_DIR/their-pipe"
 ln -s their-pipe "$SMOKE_DIR/theirs3.png"
 LD_PRELOAD=$OTHERUID WAYLAND_DISPLAY=wayland-0 timeout "$TIMEOUT" "$SHOT" -q \
 	-f "$SMOKE_DIR/theirs3.png" >/dev/null 2>>"$LOG"
-expect "... and one to their pipe is not: replaced, nothing goes to them" \
+expect "-f on a link to someone else's pipe: replaced, nothing goes to them" \
 	"[ $? = 0 ] && [ ! -L \"$SMOKE_DIR/theirs3.png\" ] && [ -p \"$SMOKE_DIR/their-pipe\" ]"
-# Their pipe right at the name, or their file of mode 666: replaced, as nothing there.
 mkfifo "$SMOKE_DIR/theirs4.png"
 LD_PRELOAD=$OTHERUID WAYLAND_DISPLAY=wayland-0 timeout "$TIMEOUT" "$SHOT" -q \
 	-f "$SMOKE_DIR/theirs4.png" >/dev/null 2>>"$LOG"
@@ -198,34 +194,17 @@ chmod 666 "$SMOKE_DIR/theirs5.png"
 (umask 077 && LD_PRELOAD=$OTHERUID run_shot -f "$SMOKE_DIR/theirs5.png")
 expect "-f on someone else's file of mode 666, under umask 077: 600" \
 	"[ \$(stat -c %a \"$SMOKE_DIR/theirs5.png\") = 600 ]"
-# One's own pipe, swapped for a link to another file just as it is opened: nothing is
-# written there.
+# One's own pipe, swapped for a link to a file just as it is opened: what was found is
+# checked, not the name, so the link is replaced and the file stays as it was.
 mkfifo "$SMOKE_DIR/mine.fifo"
-echo secret >"$SMOKE_DIR/victim"
-ln -s victim "$SMOKE_DIR/swap-link"
+echo secret >"$SMOKE_DIR/victim2"
+ln -s victim2 "$SMOKE_DIR/swap-link"
 SWAP_PATH=$SMOKE_DIR/mine.fifo SWAP_WITH=$SMOKE_DIR/swap-link LD_PRELOAD=$SWAPOPEN \
 	WAYLAND_DISPLAY=wayland-0 timeout "$TIMEOUT" "$SHOT" -q -f "$SMOKE_DIR/mine.fifo" \
-	>/dev/null 2>"$SHOT_ERR"
-expect "-f on a pipe swapped for a link while opened: status 1" "[ $? = 1 ]"
-expect "... and the file the link leads to is untouched" \
-	"[ \"\$(cat \"$SMOKE_DIR/victim\")\" = secret ]"
-# Or for another file, as a hard link to one of one's own can be: not written either.
-rm -f "$SMOKE_DIR/mine.fifo"
-mkfifo "$SMOKE_DIR/mine.fifo"
-echo secret >"$SMOKE_DIR/swap-file"
-SWAP_PATH=$SMOKE_DIR/mine.fifo SWAP_WITH=$SMOKE_DIR/swap-file LD_PRELOAD=$SWAPOPEN \
-	WAYLAND_DISPLAY=wayland-0 timeout "$TIMEOUT" "$SHOT" -q -f "$SMOKE_DIR/mine.fifo" \
-	>/dev/null 2>"$SHOT_ERR"
-expect "-f on a pipe swapped for a file while opened: status 1" "[ $? = 1 ]"
-expect "... and that file is untouched" "[ \"\$(cat \"$SMOKE_DIR/mine.fifo\")\" = secret ]"
-# Or for a link to a pipe nobody reads: not even opened, which would wait for good.
-rm -f "$SMOKE_DIR/mine.fifo"
-mkfifo "$SMOKE_DIR/mine.fifo" "$SMOKE_DIR/unread.fifo"
-ln -s unread.fifo "$SMOKE_DIR/swap-link2"
-SWAP_PATH=$SMOKE_DIR/mine.fifo SWAP_WITH=$SMOKE_DIR/swap-link2 LD_PRELOAD=$SWAPOPEN \
-	WAYLAND_DISPLAY=wayland-0 timeout 5 "$SHOT" -q -f "$SMOKE_DIR/mine.fifo" \
-	>/dev/null 2>"$SHOT_ERR"
-expect "-f on a pipe swapped for a link to another pipe: status 1, at once" "[ $? = 1 ]"
+	>/dev/null 2>>"$LOG"
+expect "-f on a pipe swapped for a link while opened: status 0" "[ $? = 0 ]"
+expect "... the file it leads to untouched" "[ \"\$(cat \"$SMOKE_DIR/victim2\")\" = secret ]"
+expect "... and the picture in its place" "\"$PNGCMP\" same \"$SMOKE_DIR/mine.fifo\" \"$WALL\""
 mkfifo "$SMOKE_DIR/pipe"
 timeout "$TIMEOUT" cat "$SMOKE_DIR/pipe" >"$SMOKE_DIR/piped.png" &
 reader=$!
@@ -234,6 +213,11 @@ wait "$reader"
 expect "-f on a named pipe: still a pipe" "[ -p \"$SMOKE_DIR/pipe\" ] && [ $STATUS = 0 ]"
 expect "... whose reader gets the picture" "\"$PNGCMP\" same \"$SMOKE_DIR/piped.png\" \"$WALL\""
 expect "... and no path on stdout" "[ -z \"\$OUT\" ]"
+# A pipe on another fd, as >(...) gives: /dev/fd/3.
+WAYLAND_DISPLAY=wayland-0 "$SHOT" -q -f /dev/fd/3 3>&1 >/dev/null 2>>"$LOG" |
+	cat >"$SMOKE_DIR/fd3.png"
+expect "-f /dev/fd/3 on a pipe: the pipe gets the picture" \
+	"\"$PNGCMP\" same \"$SMOKE_DIR/fd3.png\" \"$WALL\""
 WAYLAND_DISPLAY=wayland-0 "$SHOT" -f /dev/stdout >"$SMOKE_DIR/devout.png" 2>>"$LOG"
 expect "-f /dev/stdout: as -f -, the PNG and nothing else" \
 	"\"$PNGCMP\" same \"$SMOKE_DIR/devout.png\" \"$WALL\""
@@ -692,6 +676,20 @@ for corner in "$l $t ff0000" "$r $t 00ff00" "$l $b 0000ff" "$r $b ffffff"; do
 	got=$(build/pngtool pixel "$SMOKE_DIR/mixed.png" "$1" "$2")
 	expect "two scales: the scaled up corner at $1,$2 is $3 ($got)" "[ \"$got\" = $3 ]"
 done
+# A drag on the one scaled up, from 100 to 300 and 100 to 200, where vinput puts the
+# pointer at .5: its overlay shows its own pixels 100 to 299 and 100 to 199, which are
+# the picture's 200 to 599 and 200 to 399, twice as large.
+start_mouse 1920 720
+region_start -f "$SMOKE_DIR/mixdrag.png"
+do_input move $((x + 100)) $((y + 100))
+do_input down left
+do_input move $((x + 300)) $((y + 200))
+do_input up left
+region_end
+"$PNGCMP" crop "$SMOKE_DIR/mixed.png" $((l + 200)) $((t + 200)) 400 200 "$SMOKE_DIR/mixwant.png"
+expect "two scales: a drag on the scaled one gives what its overlay showed" \
+	"[ $STATUS = 0 ] && \"$PNGCMP\" same \"$SMOKE_DIR/mixdrag.png\" \"$SMOKE_DIR/mixwant.png\""
+stop_vinput
 stop_mwc
 
 # Both at 1.3, but 1280x720 and 1920x1080: their logical sizes are cut off to whole
@@ -719,6 +717,27 @@ frames_in() {
 		expect "$label: $name ($mw x $mh at $px,$py) is its frame" \
 			"\"$PNGCMP\" same \"$SMOKE_DIR/piece.png\" \"$SMOKE_DIR/frame-$name.png\""
 	done <"$SMOKE_DIR/pieces"
+	# Right before each one, where another ends: that one's edge, its last column or
+	# row again where its box has a spare one, not black and not a blend.
+	local at x y on fx fy
+	awk '{ n[NR] = $1; x[NR] = $2; y[NR] = $3; w[NR] = $4; h[NR] = $5 }
+		END { for (b = 1; b <= NR; b++) for (a = 1; a <= NR; a++) {
+			if (a == b) continue
+			if (x[b] > 0 && x[a] < x[b] && x[b] <= x[a] + w[a] + 1 &&
+					y[a] <= y[b] + 10 && y[b] + 10 < y[a] + h[a])
+				print n[b], x[b] - 1, y[b] + 10, n[a],
+					(x[b] - 1 - x[a] < w[a] ? x[b] - 1 - x[a] : w[a] - 1),
+					y[b] + 10 - y[a]
+			if (y[b] > 0 && y[a] < y[b] && y[b] <= y[a] + h[a] + 1 &&
+					x[a] <= x[b] + 10 && x[b] + 10 < x[a] + w[a])
+				print n[b], x[b] + 10, y[b] - 1, n[a], x[b] + 10 - x[a],
+					(y[b] - 1 - y[a] < h[a] ? y[b] - 1 - y[a] : h[a] - 1)
+		} }' "$SMOKE_DIR/pieces" >"$SMOKE_DIR/seams"
+	while read -r at x y on fx fy; do
+		expect "$label: at the seam before $at, $x,$y is $on's edge" \
+			"[ \"\$(build/pngtool pixel \"$picture\" $x $y)\" = \
+			   \"\$(build/pngtool pixel \"$SMOKE_DIR/frame-$on.png\" $fx $fy)\" ]"
+	done <"$SMOKE_DIR/seams"
 }
 # own <name> <x> <y>: the pixel of the frame of that monitor the pointer moved to x y is
 # on, at the monitor's own scale, as its overlay shows it. vinput puts it in the middle
@@ -777,6 +796,36 @@ region_end
 expect "1.3 one below the other: a click on the lower one is its frame" \
 	"[ $STATUS = 0 ] && \"$PNGCMP\" same \"$SMOKE_DIR/click13.png\" \"$SMOKE_DIR/frame-HEADLESS-1.png\""
 stop_vinput
+stop_mwc
+
+# 1920x1200 above 2560x1440 at 1.3: the lower one is a pixel and a bit wider than its
+# box would be at the upper one's scale, so it is still copied as it is, and nothing
+# between them is blended.
+{ printf 'Mwm*HEADLESS-%s*outputScale: 1.3\n' 1 2
+  printf 'Mwm*HEADLESS-1*outputMode: 1920x1200\nMwm*HEADLESS-2*outputMode: 2560x1440\n'
+  printf 'Mwm*HEADLESS-1*outputPosition: 0,0\nMwm*HEADLESS-2*outputPosition: 0,923\n'
+} >"$XDG_CONFIG_HOME/mwc/mwmrc"
+begin
+run_shot -l
+echo "$OUT" >"$SMOKE_DIR/layout"
+run_shot -f "$SMOKE_DIR/wide13.png"
+frames_in "1.3, the wider one below" "$SMOKE_DIR/wide13.png"
+stop_mwc
+
+# Three in a row at 1.5, 1920, 1920 and 2560 wide: rounding each one's place down on its
+# own left a black column before the third. One map for all edges leaves none.
+export WLR_HEADLESS_OUTPUTS=3
+{ printf 'Mwm*HEADLESS-%s*outputScale: 1.5\n' 1 2 3
+  printf 'Mwm*HEADLESS-1*outputMode: 1920x1080\nMwm*HEADLESS-2*outputMode: 1920x1080\n'
+  printf 'Mwm*HEADLESS-3*outputMode: 2560x1440\n'
+  printf 'Mwm*HEADLESS-1*outputPosition: 0,0\nMwm*HEADLESS-2*outputPosition: 1280,0\n'
+  printf 'Mwm*HEADLESS-3*outputPosition: 2560,0\n'
+} >"$XDG_CONFIG_HOME/mwc/mwmrc"
+begin
+run_shot -l
+echo "$OUT" >"$SMOKE_DIR/layout"
+run_shot -f "$SMOKE_DIR/three15.png"
+frames_in "1.5, three in a row" "$SMOKE_DIR/three15.png"
 stop_mwc
 rm "$XDG_CONFIG_HOME/mwc/mwmrc"
 unset WLR_HEADLESS_OUTPUTS

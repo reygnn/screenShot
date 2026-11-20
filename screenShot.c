@@ -626,55 +626,51 @@ static void swap_red_blue(struct output *o)
  * pixel go to *origin_x, *origin_y, *scale_x and *scale_y.
  */
 /*
- * Where an output goes in the picture, in its pixels, and by how much it is scaled. One
- * off by less than a pixel over its whole size is copied as it is: the logical sizes are
- * whole numbers, so 1280x720 and 1920x1080 at 1.3 get slightly different scales.
+ * Where an output goes in the picture, in its pixels, and by how much it is scaled. All
+ * edges go through one map, the layout's logical pixels times the largest scale, rounded
+ * down, so outputs that touch in the layout touch in the picture: no gap, no seam. An
+ * output whose box is its own size within a pixel is copied as it is, the box's spare
+ * row or column its edge again: the logical sizes are whole numbers, so 1280x720 and
+ * 1920x1080 at 1.3 get scales that differ in the fourth place.
  */
-static void place(const struct output *o, int x0, int y0, double scx, double scy,
-	double *px, double *py, double *rx, double *ry)
+static int edge(int v, int origin, double scale)
+{
+	return pixel_at((v - origin) * scale);
+}
+
+static void box_of(const struct output *o, int x0, int y0, double scx, double scy,
+	int *bx, int *by, int *bw, int *bh, double *rx, double *ry)
 {
 	int x, y, w, h, tw, th;
 	logical_box(o, &x, &y, &w, &h);
 	transformed_size(o, &tw, &th);
-	double sx, sy;
-	output_scale(o, &sx, &sy);
-	*rx = scx / sx;
-	*ry = scy / sy;
-	*px = (x - x0) * scx;
-	*py = (y - y0) * scy;
-	/* Down, not to the nearest: one below another then starts where that one ends,
-	 * at most overlapping a part of a row, never leaving a black one. */
-	if (fabs(*rx - 1) * tw < 1 && fabs(*ry - 1) * th < 1) {
-		*rx = *ry = 1;
-		*px = pixel_at(*px);
-		*py = pixel_at(*py);
-	}
+	*bx = edge(x, x0, scx);
+	*by = edge(y, y0, scy);
+	*bw = edge(x + w, x0, scx) - *bx;
+	*bh = edge(y + h, y0, scy) - *by;
+	bool exact = abs(*bw - tw) <= 1 && abs(*bh - th) <= 1;
+	*rx = exact || tw == 0 ? 1 : (double)*bw / tw;
+	*ry = exact || th == 0 ? 1 : (double)*bh / th;
 }
 
 static cairo_surface_t *compose(struct output **list, int n, int *origin_x, int *origin_y,
 	double *scale_x, double *scale_y)
 {
-	int x0 = INT_MAX, y0 = INT_MAX;
+	int x0 = INT_MAX, y0 = INT_MAX, x1 = INT_MIN, y1 = INT_MIN;
 	double scx = 0, scy = 0;
 	for (int i = 0; i < n; i++) {
 		int x, y, w, h;
 		logical_box(list[i], &x, &y, &w, &h);
 		if (x < x0) x0 = x;
 		if (y < y0) y0 = y;
+		if (x + w > x1) x1 = x + w;
+		if (y + h > y1) y1 = y + h;
 		double sx, sy;
 		output_scale(list[i], &sx, &sy);
 		scx = fmax(scx, sx);
 		scy = fmax(scy, sy);
 	}
-	int width = 0, height = 0;
-	for (int i = 0; i < n; i++) {
-		int tw, th;
-		double px, py, rx, ry;
-		transformed_size(list[i], &tw, &th);
-		place(list[i], x0, y0, scx, scy, &px, &py, &rx, &ry);
-		width = fmax(width, (int)(px + tw * rx + 0.5));
-		height = fmax(height, (int)(py + th * ry + 0.5));
-	}
+	int width = edge(x1, x0, scx), height = edge(y1, y0, scy);
 	cairo_surface_t *out = cairo_image_surface_create(CAIRO_FORMAT_RGB24, width, height);
 	if (cairo_surface_status(out) != CAIRO_STATUS_SUCCESS)
 		die("cannot make a %dx%d picture", width, height);
@@ -687,25 +683,26 @@ static cairo_surface_t *compose(struct output **list, int n, int *origin_x, int 
 		/* Alpha on a screen means nothing: x or a, it is opaque. */
 		cairo_surface_t *src = cairo_image_surface_create_for_data(o->data,
 			CAIRO_FORMAT_RGB24, o->width, o->height, o->stride);
-		int tw, th;
-		transformed_size(o, &tw, &th);
-		double px, py, sx, sy;
-		place(o, x0, y0, scx, scy, &px, &py, &sx, &sy);
+		int bx, by, bw, bh;
+		double rx, ry;
+		box_of(o, x0, y0, scx, scy, &bx, &by, &bw, &bh, &rx, &ry);
 
 		cairo_save(cr);
-		cairo_translate(cr, px, py);
-		cairo_scale(cr, sx, sy);
+		cairo_rectangle(cr, bx, by, bw, bh);
+		cairo_clip(cr);
+		cairo_translate(cr, bx, by);
+		cairo_scale(cr, rx, ry);
 		cairo_pattern_t *p = cairo_pattern_create_for_surface(src);
 		cairo_matrix_t m;
 		buffer_matrix(o, &m);
 		cairo_pattern_set_matrix(p, &m);
-		bool exact = sx == 1 && sy == 1;
+		bool exact = rx == 1 && ry == 1;
 		cairo_pattern_set_filter(p, exact ? CAIRO_FILTER_NEAREST : CAIRO_FILTER_GOOD);
-		/* Scaled up, the edge pixels would blend with what lies outside: black. */
+		/* Past the buffer's edge, as for a spare row, and for the filter: the edge
+		 * again, not the black around it. */
 		cairo_pattern_set_extend(p, CAIRO_EXTEND_PAD);
 		cairo_set_source(cr, p);
-		cairo_rectangle(cr, 0, 0, tw, th);
-		cairo_fill(cr);
+		cairo_paint(cr);
 		cairo_pattern_destroy(p);
 		cairo_restore(cr);
 		cairo_surface_destroy(src);
@@ -1152,12 +1149,12 @@ static bool select_rectangle(struct output **list, int n, double *x, double *y,
 }
 
 /*
- * A point in the layout, in the picture's pixels: through the monitor it lies on, where
- * compose() put that one and at its own scale, so they are the pixels the overlay showed
- * there. A point that ends a rectangle takes a monitor's right and bottom edge as its own.
+ * The picture's pixel a point in the layout is on: through the monitor it lies on, first
+ * its own pixel, as the overlay rounds it, then where compose() put that one. A point
+ * that ends a rectangle takes a monitor's right and bottom edge as its own.
  */
 static void to_picture(struct output **list, int n, int x0, int y0, double scx, double scy,
-	double x, double y, bool end, double *to_x, double *to_y)
+	double x, double y, bool end, int *to_x, int *to_y)
 {
 	for (int i = 0; i < n; i++) {
 		int lx, ly, lw, lh;
@@ -1166,15 +1163,16 @@ static void to_picture(struct output **list, int n, int x0, int y0, double scx, 
 			x >= lx && x < lx + lw && y >= ly && y < ly + lh;
 		if (!in)
 			continue;
-		double px, py, rx, ry, sx, sy;
-		place(list[i], x0, y0, scx, scy, &px, &py, &rx, &ry);
+		int bx, by, bw, bh;
+		double rx, ry, sx, sy;
+		box_of(list[i], x0, y0, scx, scy, &bx, &by, &bw, &bh, &rx, &ry);
 		output_scale(list[i], &sx, &sy);
-		*to_x = px + (x - lx) * sx * rx;
-		*to_y = py + (y - ly) * sy * ry;
+		*to_x = bx + (int)round(pixel_at((x - lx) * sx) * rx);
+		*to_y = by + (int)round(pixel_at((y - ly) * sy) * ry);
 		return;
 	}
-	*to_x = (x - x0) * scx;
-	*to_y = (y - y0) * scy;
+	*to_x = pixel_at((x - x0) * scx);
+	*to_y = pixel_at((y - y0) * scy);
 }
 
 /*
@@ -1187,14 +1185,18 @@ static cairo_surface_t *cut(cairo_surface_t *picture, struct output **list, int 
 {
 	int pw = cairo_image_surface_get_width(picture);
 	int ph = cairo_image_surface_get_height(picture);
-	double ax, ay, bx, by;
-	to_picture(list, n, origin_x, origin_y, sx, sy, x, y, false, &ax, &ay);
-	to_picture(list, n, origin_x, origin_y, sx, sy, x + w, y + h, true, &bx, &by);
-	int x0 = pixel_at(ax), y0 = pixel_at(ay), x1 = pixel_at(bx), y1 = pixel_at(by);
+	int x0, y0, x1, y1;
+	to_picture(list, n, origin_x, origin_y, sx, sy, x, y, false, &x0, &y0);
+	to_picture(list, n, origin_x, origin_y, sx, sy, x + w, y + h, true, &x1, &y1);
 	x0 = x0 < 0 ? 0 : x0 > pw ? pw : x0;
 	x1 = x1 < 0 ? 0 : x1 > pw ? pw : x1;
 	y0 = y0 < 0 ? 0 : y0 > ph ? ph : y0;
 	y1 = y1 < 0 ? 0 : y1 > ph ? ph : y1;
+	/* On an edge two monitors share, its ends may go through different ones. */
+	if (x1 < x0)
+		x1 = x0;
+	if (y1 < y0)
+		y1 = y0;
 	/* A drag of a hair still gets a pixel. */
 	if (x1 == x0 && x1 < pw)
 		x1++;
@@ -1418,8 +1420,7 @@ static void save_default(const struct mem *png, char *saved, size_t size)
 	die("too many screenshots named %s in %s", stamp, dir);
 }
 
-/* One's own or root's. In a container root's may show as nobody's; what matters there,
- * /dev/stdout, is told apart by being stdout. */
+/* One's own or root's: a pipe or device of someone else's may be read by them. */
 static bool mine(const struct stat *st)
 {
 	return st->st_uid == geteuid() || st->st_uid == 0;
@@ -1432,81 +1433,52 @@ static bool is_stdout(const struct stat *st)
 		out.st_ino == st->st_ino;
 }
 
-/* Into one's own pipe or device, and only the very one lstat saw: no link followed,
- * nothing made or cut off before that is sure. */
-static void write_into(const char *path, const struct stat *seen, const struct mem *png)
+/*
+ * Into a pipe or device of one's own, as /dev/fd/3, >(...) or a named pipe give: false
+ * if the name leads to no such thing, and the picture is to replace it. The name is
+ * opened only as a path: the kernel follows its links, with its own protections, and
+ * neither waits for a reader nor wakes a device. What it found is checked, then that
+ * very one opened through /proc, so nothing swapped in meanwhile is written.
+ */
+static bool write_into(const char *file, const struct mem *png)
 {
-	int fd = open(path, O_WRONLY | O_NOFOLLOW | O_CLOEXEC);
-	if (fd < 0)
-		die("cannot write %s: %s", path, strerror(errno));
+	int path = open(file, O_PATH | O_CLOEXEC);
+	if (path < 0)
+		return false;
 	struct stat st;
-	if (fstat(fd, &st) < 0 || st.st_dev != seen->st_dev || st.st_ino != seen->st_ino)
-		die("cannot write %s: it was swapped for something else", path);
-	if (!write_all(fd, png->data, png->len) || close(fd) < 0)
-		die("cannot write %s: %s", path, strerror(errno));
-}
-
-/* Where one's own link to nothing points, so the picture can be made there: the
- * folder resolved, the name as the link gives it. False if the folder is not there. */
-static bool dangling_target(const char *link, char *out, size_t size)
-{
-	char to[PATH_MAX], dir[PATH_MAX], real[PATH_MAX];
-	ssize_t n = readlink(link, to, sizeof(to) - 1);
-	if (n <= 0)
+	if (fstat(path, &st) < 0 || !(S_ISFIFO(st.st_mode) || S_ISCHR(st.st_mode)) ||
+			!mine(&st)) {
+		close(path);
 		return false;
-	to[n] = '\0';
-	const char *slash = strrchr(link, '/');
-	int len;
-	if (to[0] == '/' || !slash)
-		len = snprintf(dir, sizeof(dir), "%s", to);
-	else
-		len = snprintf(dir, sizeof(dir), "%.*s/%s", (int)(slash - link), link, to);
-	if (len < 0 || len >= (int)sizeof(dir))
-		return false;
-	char *base = strrchr(dir, '/');
-	const char *name = base ? base + 1 : dir;
-	if (base)
-		*base = '\0';
-	if (!realpath(base ? (dir[0] ? dir : "/") : ".", real))
-		return false;
-	return snprintf(out, size, "%s/%s", real, name) < (int)size;
+	}
+	char proc[64];
+	snprintf(proc, sizeof(proc), "/proc/self/fd/%d", path);
+	int fd = open(proc, O_WRONLY | O_CLOEXEC);
+	close(path);
+	if (fd < 0 || !write_all(fd, png->data, png->len) || close(fd) < 0)
+		die("cannot write %s: %s", file, strerror(errno));
+	return true;
 }
 
 /*
- * A plain file, or none, gets the picture all at once through a rename, which replaces
- * whatever lies there at that moment and follows nothing. One's own file keeps its mode,
- * so a private one stays private. One's own link is followed, one's own pipe or device
- * written into. Someone else's link, pipe or file in a shared folder is replaced as a
- * missing file would be: it could lead to ~/.bashrc, or to a pipe they read.
+ * stdout, as - or /dev/stdout, is written to as it is: a name swapped meanwhile leads
+ * nowhere else. One's own pipe or device is written into. Anything else is replaced
+ * through a rename, which follows nothing: a plain file, also someone else's, a link,
+ * which stays no link, a pipe of someone else's. Only one's own file keeps its mode, so
+ * a private one stays private. No path is printed but for a file.
  */
 static void save_file(const char *file, const struct mem *png, char *saved, size_t size)
 {
 	struct stat st;
-	/* stdout itself, as - or /dev/stdout: written to, not opened, so a name swapped
-	 * meanwhile leads nowhere else. No path goes into the picture. */
 	if (strcmp(file, "-") == 0 || (stat(file, &st) == 0 && is_stdout(&st))) {
 		if (!write_all(STDOUT_FILENO, png->data, png->len))
 			die("cannot write to stdout: %s", strerror(errno));
 		return;
 	}
-	char target[PATH_MAX];
-	const char *path = file;
-	bool there = lstat(file, &st) == 0;
-	if (there && S_ISLNK(st.st_mode) && mine(&st)) {
-		if (realpath(file, target)) {
-			path = target;
-			there = lstat(path, &st) == 0;
-		} else if (errno == ENOENT && dangling_target(file, target, sizeof(target))) {
-			path = target;
-			there = false;
-		}
-	}
-	if (there && (S_ISFIFO(st.st_mode) || S_ISCHR(st.st_mode)) && mine(&st)) {
-		write_into(path, &st, png);
+	if (write_into(file, png))
 		return;
-	}
 	char dir[PATH_MAX];
-	snprintf(dir, sizeof(dir), "%s", path);
+	snprintf(dir, sizeof(dir), "%s", file);
 	char *slash = strrchr(dir, '/');
 	if (!slash)
 		snprintf(dir, sizeof(dir), ".");
@@ -1516,15 +1488,15 @@ static void save_file(const char *file, const struct mem *png, char *saved, size
 		*slash = '\0';
 	char tmp[PATH_MAX];
 	int fd = temp_file(dir, tmp, sizeof(tmp));
-	if (there && S_ISREG(st.st_mode) && st.st_uid == geteuid())
+	if (lstat(file, &st) == 0 && S_ISREG(st.st_mode) && st.st_uid == geteuid())
 		fchmod(fd, st.st_mode & 0777);
 	write_temp(fd, tmp, png);
-	if (rename(tmp, path) < 0) {
+	if (rename(tmp, file) < 0) {
 		int err = errno;
 		unlink(tmp);
 		die("cannot write %s: %s", file, strerror(err));
 	}
-	print_path(path, saved, size);
+	print_path(file, saved, size);
 }
 
 /* ---- the toast ---------------------------------------------------------------------- */
