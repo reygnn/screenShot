@@ -22,6 +22,9 @@ done
 [ -d "$MWC_DIR" ] || { echo "FAIL: no mwc in $MWC_DIR (set MWC_DIR)"; exit 1; }
 cd "$MWC_DIR" || exit 1
 . tests/lib.sh
+# mwc's root colour, from the source it was built from: it has changed before.
+ROOT=$(sed -n 's/^#define COLOR_ROOT 0x\([0-9a-f]\{6\}\)u$/\1/p' src/color.h)
+[ -n "$ROOT" ] || { echo "FAIL: no COLOR_ROOT in $MWC_DIR/src/color.h"; exit 1; }
 # Nothing here may reach the running session, also before the first mwc: a regression
 # in the option checks would otherwise copy into its clipboard or freeze its screen.
 export XDG_RUNTIME_DIR=$SMOKE_DIR
@@ -76,7 +79,7 @@ pixel_now() { # <x> <y>
 # are pure colours, whichever way the monitor is turned.
 wallpaper_up() {
 	local got
-	got=$(pixel_now 1 1) && [ -n "$got" ] && [ "$got" != 5b7792 ]
+	got=$(pixel_now 1 1) && [ -n "$got" ] && [ "$got" != "$ROOT" ]
 }
 
 begin() {
